@@ -1,0 +1,68 @@
+name: Release
+
+# Publicada ao enviar uma tag vX.Y.Z (use scripts/publicar.ps1).
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Conferir versão da tag
+        id: versao
+        shell: pwsh
+        run: |
+          $versao = "${{ github.ref_name }}".TrimStart("v")
+          $codigo = Get-Content leitor_universal/__init__.py -Raw
+          if ($codigo -notmatch "__version__ = `"$([regex]::Escape($versao))`"") {
+            throw "A tag $versao não corresponde a __version__ em leitor_universal/__init__.py"
+          }
+          "valor=$versao" >> $env:GITHUB_OUTPUT
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt pyinstaller pytest
+
+      - name: Testes
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q tests
+
+      - name: Empacotar com PyInstaller
+        run: pyinstaller packaging/LeitorUniversal.spec --noconfirm
+
+      - name: Gerar instalador
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=${{ steps.versao.outputs.valor }}" packaging/installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o instalador" }
+
+      - name: Versão portátil e checksums
+        shell: pwsh
+        run: |
+          $v = "${{ steps.versao.outputs.valor }}"
+          Compress-Archive -Path dist/LeitorUniversal/* -DestinationPath "dist/LeitorUniversal-$v-portable.zip"
+          Get-ChildItem dist -File | Where-Object Name -match '\.(exe|zip)$' | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content dist/SHA256SUMS.txt -Encoding utf8NoBOM
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/LeitorUniversal-*-setup.exe
+            dist/LeitorUniversal-*-portable.zip
+            dist/SHA256SUMS.txt
