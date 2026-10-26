@@ -50,6 +50,13 @@ if (-not $Versao) {
 if ($Versao -notmatch '^\d+\.\d+\.\d+$') { throw "Versão inválida: $Versao (use X.Y.Z)." }
 if (git tag --list "v$Versao") { throw "A tag v$Versao já existe." }
 
+$changelog = Join-Path $raiz "CHANGELOG.md"
+$textoLog = Get-Content $changelog -Raw -Encoding utf8
+$pendente = [regex]::Match($textoLog, '(?ms)^## \[Não publicado\]\s*\n(.*?)(?=^## \[|\z)')
+if (-not $pendente.Success -or -not $pendente.Groups[1].Value.Trim()) {
+    throw "Descreva as novidades em '## [Não publicado]' no CHANGELOG.md antes de publicar."
+}
+
 Write-Host "Executando testes..." -ForegroundColor Cyan
 $env:QT_QPA_PLATFORM = "offscreen"
 & $python -m pytest -q tests
@@ -59,7 +66,11 @@ Write-Host "Publicando $maior.$menor.$corr -> $Versao" -ForegroundColor Cyan
 (Get-Content $arquivoVersao -Raw) -replace '__version__ = "[^"]+"', "__version__ = `"$Versao`"" |
     Set-Content $arquivoVersao -NoNewline -Encoding utf8
 
-git add $arquivoVersao
+$data = Get-Date -Format "yyyy-MM-dd"
+$textoLog = $textoLog -replace '(?m)^## \[Não publicado\]', "## [Não publicado]`n`n## [$Versao] - $data"
+Set-Content $changelog $textoLog -NoNewline -Encoding utf8
+
+git add $arquivoVersao $changelog
 git commit -m "Versão $Versao"
 git tag -a "v$Versao" -m "Versão $Versao"
 git push origin main

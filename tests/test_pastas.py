@@ -110,7 +110,7 @@ def test_preferencias_persistem(tmp_path):
     padrao = Preferences.load(lib)
     assert padrao.recursive and padrao.watch and padrao.formats == DEFAULT_FORMAT_GROUPS
     Preferences(recursive=False, watch=False, formats=("pdf",), theme="escuro",
-                open_last=True, auto_update=False).save(lib)
+                open_last=True).save(lib)
     lidas = Preferences.load(lib)
-    assert (lidas.recursive, lidas.watch, lidas.formats, lidas.theme, lidas.open_last, lidas.auto_update) == \
-        (False, False, ("pdf",), "escuro", True, False)
+    assert (lidas.recursive, lidas.watch, lidas.formats, lidas.theme, lidas.open_last) == \
+        (False, False, ("pdf",), "escuro", True)

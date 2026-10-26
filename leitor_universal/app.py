@@ -8,10 +8,9 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import time
 
-from PySide6.QtCore import QByteArray, QFileSystemWatcher, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
+from PySide6.QtCore import QByteArray, QFileSystemWatcher, QLibraryInfo, Qt, QTimer, QTranslator, QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QInputDialog, QMainWindow, QMessageBox, QProgressDialog,
     QStackedWidget,
@@ -24,10 +23,11 @@ from .library_view import LibraryView
 from .reader import ReaderWidget
 from .scanner import ScanThread
 from .settings_dialog import Preferences, SettingsDialog
+from .update_dialog import UpdateDialog
 from .themes import THEMES, apply_theme
 
 APP_NAME = "Leitor Universal"
-UPDATE_CHECK_INTERVAL = 12 * 3600  # verificação automática no máximo a cada 12 h
+UPDATE_CHECK_INTERVAL_MS = 6 * 3600 * 1000  # nova verificação enquanto o app fica aberto
 RESYNC_INTERVAL_MS = 10 * 60 * 1000  # varredura periódica das pastas monitoradas
 MAX_WATCHED_DIRS = 400
 log = logging.getLogger("leitor")
@@ -83,11 +83,14 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(QByteArray.fromBase64(geometry.encode()))
         self.set_theme(theme.key)
 
+        # Atualizações são obrigatórias: verifica ao abrir e periodicamente.
         self._update_thread = None
         self._download_thread = None
-        self._download_dialog = None
-        if self.prefs.auto_update:
-            QTimer.singleShot(4000, self._auto_check_updates)
+        self._update_dialog: UpdateDialog | None = None
+        self._update_timer = QTimer(self, interval=UPDATE_CHECK_INTERVAL_MS,
+                                    timeout=lambda: self.check_for_updates(manual=False))
+        self._update_timer.start()
+        QTimer.singleShot(800, lambda: self.check_for_updates(manual=False))
 
         self._scan_thread: ScanThread | None = None
         self._sync_again = False
@@ -198,13 +201,8 @@ class MainWindow(QMainWindow):
             self.open_book(last.id)
 
     # ------------------------------------------------------- atualizações
-    def _auto_check_updates(self) -> None:
-        last = float(self.library.setting("atualizacao_verificada_em", "0") or 0)
-        if time.time() - last >= UPDATE_CHECK_INTERVAL:
-            self.check_for_updates(manual=False)
-
     def check_for_updates(self, manual: bool) -> None:
-        if self._update_thread and self._update_thread.isRunning():
+        if (self._update_thread and self._update_thread.isRunning()) or self._update_dialog:
             return
         self._update_thread = updater.UpdateCheckThread(self)
         self._update_thread.finished_check.connect(
@@ -217,57 +215,48 @@ class MainWindow(QMainWindow):
             if manual:
                 QMessageBox.warning(self, "Atualizações", error)
             return
-        self.library.set_setting("atualizacao_verificada_em", str(time.time()))
-        newer = updater.is_newer(release.version)
-        skipped = self.library.setting("atualizacao_ignorada") == release.version
-        if not newer or (skipped and not manual):
+        if release is None:
             if manual:
                 QMessageBox.information(self, "Atualizações",
                                         f"Você já está na versão mais recente ({__version__}).")
             return
+        log.info("Atualização obrigatória disponível: %s", release.version)
+        installable = updater.is_installed_build() and bool(release.installer_url)
+        icon = QPixmap(str(Path(__file__).with_name("icone.png")))
+        dialog = UpdateDialog(release, icon, installable, self)
+        dialog.update_requested.connect(
+            lambda: self._start_update(release) if installable else self._open_release_page(release))
+        dialog.rejected.connect(lambda: self._update_declined(installable))
+        self._update_dialog = dialog
+        dialog.open()
 
-        box = QMessageBox(self)
-        box.setWindowTitle("Atualização disponível")
-        box.setIcon(QMessageBox.Information)
-        box.setText(f"<b>Leitor Universal {release.version}</b> está disponível "
-                    f"(você usa a {__version__}).")
-        box.setInformativeText(
-            "Deseja atualizar agora? Sua biblioteca e o progresso de leitura são preservados."
-            if updater.is_installed_build()
-            else "Você está executando a partir do código-fonte; a página da release será aberta.")
-        if release.notes:
-            box.setDetailedText(release.notes)
-        update_btn = box.addButton("Atualizar agora", QMessageBox.AcceptRole)
-        box.addButton("Depois", QMessageBox.RejectRole)
-        skip_btn = box.addButton("Ignorar esta versão", QMessageBox.DestructiveRole)
-        box.exec()
-        if box.clickedButton() is skip_btn:
-            self.library.set_setting("atualizacao_ignorada", release.version)
-        elif box.clickedButton() is update_btn:
-            if updater.is_installed_build() and release.installer_url:
-                self._download_update(release)
-            else:
-                QDesktopServices.openUrl(QUrl(release.page_url))
+    def _open_release_page(self, release) -> None:
+        QDesktopServices.openUrl(QUrl(release.page_url))
+        self._update_dialog.accept()
+        self._update_dialog = None
 
-    def _download_update(self, release) -> None:
-        dialog = QProgressDialog(f"Baixando a versão {release.version}…", None, 0, 100, self)
-        dialog.setWindowTitle("Atualizando")
-        dialog.setWindowModality(Qt.WindowModal)
-        dialog.setMinimumDuration(0)
-        dialog.setValue(0)
-        self._download_dialog = dialog
+    def _update_declined(self, installable: bool) -> None:
+        self._update_dialog = None
+        if installable:
+            log.info("Atualização recusada: encerrando o aplicativo.")
+            self.close()
+
+    def _start_update(self, release) -> None:
+        dialog = self._update_dialog
+        dialog.show_downloading()
         thread = updater.UpdateDownloadThread(release, self)
-        thread.progress.connect(lambda d, t: dialog.setValue(int(d * 100 / t)) if t else None)
+        thread.progress.connect(dialog.set_progress)
         thread.done.connect(self._on_update_downloaded)
         self._download_thread = thread
         thread.start()
 
     def _on_update_downloaded(self, path: str, error: str) -> None:
-        self._download_dialog.close()
         if error:
-            QMessageBox.warning(self, "Falha na atualização", error)
+            log.warning("Falha ao baixar a atualização: %s", error)
+            self._update_dialog.show_error(error)
             return
         updater.launch_installer(Path(path))
+        self._update_dialog.accept()
         self.close()
 
     def show_about(self) -> None:
@@ -471,6 +460,13 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
+    import PySide6
+    translator = QTranslator(app)
+    for folder in (QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath),
+                   str(Path(PySide6.__file__).parent / "translations")):
+        if translator.load("qtbase_pt_BR", folder):
+            app.installTranslator(translator)
+            break
     icon_path = Path(__file__).with_name("icone.png")
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))

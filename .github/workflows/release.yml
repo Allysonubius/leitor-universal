@@ -58,10 +58,14 @@ jobs:
           } | Set-Content dist/SHA256SUMS.txt -Encoding utf8NoBOM
           Get-Content dist/SHA256SUMS.txt
 
+      - name: Notas da versão (CHANGELOG.md)
+        run: python scripts/notas_da_versao.py ${{ steps.versao.outputs.valor }} dist/NOTAS.md
+
       - name: Publicar release
         uses: softprops/action-gh-release@v3
         with:
-          generate_release_notes: true
+          name: Leitor Universal ${{ steps.versao.outputs.valor }}
+          body_path: dist/NOTAS.md
           files: |
             dist/LeitorUniversal-*-setup.exe
             dist/LeitorUniversal-*-portable.zip

@@ -45,13 +45,14 @@ Baixe o `LeitorUniversal-X.Y.Z-setup.exe` da
 A instalação é por usuário (não pede administrador), cria atalhos e adiciona o leitor ao menu
 **Abrir com** dos formatos de livro. Há também uma versão portátil (`-portable.zip`).
 
-### Atualizações automáticas
+### Atualizações obrigatórias
 
-Ao iniciar (no máximo a cada 12 h), o aplicativo consulta a última release no GitHub. Se houver
-versão nova, mostra as novidades e oferece **Atualizar agora**: o instalador é baixado, tem o
-SHA-256 conferido com o `SHA256SUMS.txt` da release, é executado silenciosamente e reabre o app.
-Biblioteca, progresso e marcadores são preservados. Também é possível verificar manualmente em
-**⋮ → Verificar atualizações**. Erros ficam registrados em `%APPDATA%\LeitorUniversal\leitor.log`.
+A cada abertura (e a cada 6 h com o app aberto) o aplicativo consulta as releases no GitHub. Se
+houver versão nova, mostra **as novidades de todas as versões que faltam** e só oferece
+**Atualizar agora**; fechar o aviso encerra o aplicativo. O instalador é baixado, tem o SHA-256
+conferido com o `SHA256SUMS.txt` da release, é executado silenciosamente e reabre o app.
+Biblioteca, progresso e marcadores são preservados. Sem internet, o app abre normalmente e tenta
+de novo depois. Erros ficam registrados em `%APPDATA%\LeitorUniversal\leitor.log`.
 
 ## Desenvolvimento
 
@@ -85,9 +86,11 @@ Rodar os testes:
 
 1. Faça as alterações, depois `git add .`, `git commit -m "descrição"` e `git push`. O
    workflow **CI** roda os testes a cada push.
-2. Para lançar uma versão, rode o script abaixo. Ele testa, incrementa a versão, cria a tag e
+2. Descreva as novidades em `## [Não publicado]` no [CHANGELOG.md](CHANGELOG.md). Esse texto
+   é o que os usuários veem no aviso de atualização (o script recusa publicar sem ele).
+3. Rode o script abaixo. Ele testa, incrementa a versão, data a seção do CHANGELOG, cria a tag e
    envia. O workflow **Release** gera o instalador, a versão portátil e os checksums e publica a
-   release; os apps instalados passam a oferecer a atualização.
+   release com essas notas; os apps instalados são obrigados a atualizar.
 
 ```bash
 .\scripts\publicar.ps1

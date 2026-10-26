@@ -23,7 +23,6 @@ class Preferences:
     formats: tuple[str, ...] = DEFAULT_FORMAT_GROUPS
     theme: str = "claro"
     open_last: bool = False
-    auto_update: bool = True
     folders: list[str] = field(default_factory=list)
 
     @classmethod
@@ -37,7 +36,6 @@ class Preferences:
             else DEFAULT_FORMAT_GROUPS,
             theme=library.setting("tema", "claro") if library.setting("tema", "claro") in THEMES else "claro",
             open_last=flag("abrir_ultimo", False),
-            auto_update=flag("atualizacao_automatica", True),
             folders=library.folders(),
         )
 
@@ -47,7 +45,6 @@ class Preferences:
         library.set_setting("formatos", ",".join(self.formats))
         library.set_setting("tema", self.theme)
         library.set_setting("abrir_ultimo", "1" if self.open_last else "0")
-        library.set_setting("atualizacao_automatica", "1" if self.auto_update else "0")
 
 
 class SettingsDialog(QDialog):
@@ -113,12 +110,12 @@ class SettingsDialog(QDialog):
         self.open_last_cb = QCheckBox("Abrir o último livro ao iniciar")
         self.open_last_cb.setChecked(prefs.open_last)
         form.addRow(self.open_last_cb)
-        self.auto_update_cb = QCheckBox("Procurar atualizações automaticamente")
-        self.auto_update_cb.setChecked(prefs.auto_update)
+        updates_info = QLabel("Atualizações são obrigatórias e instaladas automaticamente.")
+        updates_info.setObjectName("muted")
         check_now = QPushButton("Verificar agora")
         check_now.clicked.connect(self._check_now)
         update_row = QHBoxLayout()
-        update_row.addWidget(self.auto_update_cb)
+        update_row.addWidget(updates_info)
         update_row.addStretch(1)
         update_row.addWidget(check_now)
         form.addRow(update_row)
@@ -181,7 +178,6 @@ class SettingsDialog(QDialog):
             formats=formats,
             theme=self.theme_combo.currentData(),
             open_last=self.open_last_cb.isChecked(),
-            auto_update=self.auto_update_cb.isChecked(),
             folders=self._folders(),
         )
         self.accept()
