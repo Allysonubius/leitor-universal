@@ -31,7 +31,9 @@ from .scanner import ScanThread
 from .settings_dialog import Preferences, SettingsDialog
 from .stats_view import StatsView
 from .update_dialog import UpdateDialog
-from .themes import THEMES, apply_theme
+from .effects import fade_in
+from .themes import DEFAULT_THEME, THEMES, apply_theme
+from .titlebar import RESIZE_MARGIN, FramelessResizer, TitleBar
 
 APP_NAME = "Leitor Universal"
 UPDATE_CHECK_INTERVAL_MS = 6 * 3600 * 1000  # nova verificação enquanto o app fica aberto
@@ -57,14 +59,21 @@ class MainWindow(QMainWindow):
     def __init__(self, library: Library):
         super().__init__()
         self.library = library
+        if library.setting("visual_futurista") is None:
+            # Uma vez só: quem atualiza passa a ver o novo visual (pode voltar nas Configurações).
+            library.set_setting("tema", DEFAULT_THEME)
+            library.set_setting("visual_futurista", "1")
         self.prefs = Preferences.load(library)
+        self.frameless = not self.prefs.native_frame
+        if self.frameless:
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowTitle(APP_NAME)
         self.setAcceptDrops(True)
         self.resize(1280, 820)
 
         self.restart_requested = False
         self._restore_path: Path | None = None
-        theme = THEMES.get(library.setting("tema", "claro"), THEMES["claro"])
+        theme = THEMES.get(library.setting("tema", DEFAULT_THEME), THEMES[DEFAULT_THEME])
         self.covers = CoverCache(library)
         self.library_view = LibraryView(library, self.covers, theme)
         self.collections_view = CollectionsView(library, self.covers, theme)
@@ -84,7 +93,22 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(self.shell)
         self.stack.addWidget(self.reader)
-        self.setCentralWidget(self.stack)
+
+        # Contêiner com a barra de título própria e uma borda fina para redimensionar.
+        self.frame = QWidget()
+        self.frame.setObjectName("frame")
+        frame_layout = QVBoxLayout(self.frame)
+        frame_layout.setSpacing(0)
+        icon = QPixmap(str(Path(__file__).with_name("icone.png")))
+        self.titlebar = TitleBar(self, icon)
+        self.titlebar.set_title(APP_NAME)
+        self.titlebar.setVisible(self.frameless)
+        frame_layout.addWidget(self.titlebar)
+        frame_layout.addWidget(self.stack, 1)
+        self.setCentralWidget(self.frame)
+        if self.frameless:
+            FramelessResizer(self, self.frame)
+        self._update_frame_margins()
 
         lv = self.library_view
         lv.open_requested.connect(self.open_book)
@@ -138,10 +162,23 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(bar)
         layout.setContentsMargins(10, 16, 10, 12)
         layout.setSpacing(4)
-        brand = QLabel("📖  Leitor Universal")
+        logo = QLabel()
+        logo.setPixmap(QPixmap(str(Path(__file__).with_name("icone.png"))).scaled(
+            30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        brand = QLabel("Leitor Universal")
         brand.setObjectName("brand")
-        layout.addWidget(brand)
-        layout.addSpacing(14)
+        sub = QLabel("SUA BIBLIOTECA")
+        sub.setObjectName("brandsub")
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        names.addWidget(brand)
+        names.addWidget(sub)
+        header = QHBoxLayout()
+        header.setContentsMargins(4, 0, 0, 0)
+        header.addWidget(logo)
+        header.addLayout(names, 1)
+        layout.addLayout(header)
+        layout.addSpacing(18)
         self.nav_group = QButtonGroup(self)
         self.nav_buttons: dict[QWidget, QToolButton] = {}
         for text, page in (("📚   Biblioteca", self.library_view), ("🗂   Coleções", self.collections_view),
@@ -166,8 +203,32 @@ class MainWindow(QMainWindow):
 
     def show_page(self, page: QWidget) -> None:
         self.nav_buttons[page].setChecked(True)
+        changed = self.pages.currentWidget() is not page
         self.pages.setCurrentWidget(page)
         page.refresh()
+        if changed:
+            fade_in(page)
+
+    # ------------------------------------------------------------ janela sem moldura
+    def setWindowTitle(self, text: str) -> None:
+        super().setWindowTitle(text)
+        if hasattr(self, "titlebar"):
+            self.titlebar.set_title(text)
+
+    def _update_frame_margins(self) -> None:
+        full = self.isMaximized() or self.isFullScreen() or not self.frameless
+        margin = 0 if full else RESIZE_MARGIN
+        self.frame.layout().setContentsMargins(margin, margin, margin, margin)
+        theme = THEMES.get(self.library.setting("tema", DEFAULT_THEME), THEMES[DEFAULT_THEME])
+        border = "none" if full else f"1px solid {theme.border}"
+        self.frame.setStyleSheet(f"QWidget#frame {{ background: {theme.window}; border: {border}; }}")
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange and hasattr(self, "titlebar"):
+            self.titlebar.sync_state()
+            self.titlebar.setVisible(self.frameless and not self.isFullScreen())
+            self._update_frame_margins()
 
     def _refresh_current_page(self) -> None:
         self.pages.currentWidget().refresh()
@@ -411,6 +472,9 @@ class MainWindow(QMainWindow):
     def set_theme(self, key: str) -> None:
         theme = THEMES[key]
         apply_theme(QApplication.instance(), theme)
+        self.library.set_setting("tema", key)
+        if hasattr(self, "frame"):
+            self._update_frame_margins()
         self.library_view.set_theme(theme)
         self.collections_view.set_theme(theme)
         self.stats_view.set_theme(theme)
@@ -425,6 +489,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.stack.setCurrentWidget(self.shell)
         self._refresh_current_page()
+        fade_in(self.shell)
         self.cloud_sync()
 
     def toggle_fullscreen(self) -> None:
@@ -464,6 +529,7 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         self.stack.setCurrentWidget(self.reader)
         self.reader.open_book(book, loaded)
+        fade_in(self.reader.scroll, 260)
         self.setWindowTitle(f"{book.title} — {APP_NAME}")
 
     def open_book_at(self, book_id: int, page: int, position: str) -> None:

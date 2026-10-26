@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QConicalGradient, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
+    QComboBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
     QListWidgetItem, QMenu, QPushButton, QStackedLayout, QStyle, QStyledItemDelegate, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -64,8 +64,25 @@ class BookCardDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         rect = option.rect.adjusted(6, 6, -6, -6)
-
-        if option.state & (QStyle.State_Selected | QStyle.State_MouseOver):
+        hovered = bool(option.state & (QStyle.State_Selected | QStyle.State_MouseOver))
+        if theme.glow:
+            if hovered:  # brilho: camadas translúcidas em volta do cartão
+                for i, alpha in enumerate((10, 18, 28)):
+                    glow = QColor(theme.accent)
+                    glow.setAlpha(alpha)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(glow)
+                    painter.drawRoundedRect(rect.adjusted(-3 + i, -3 + i, 3 - i, 3 - i), 14, 14)
+            painter.setBrush(QColor(theme.surface))
+            if hovered:
+                grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+                grad.setColorAt(0, QColor(theme.accent))
+                grad.setColorAt(1, QColor(theme.accent2))
+                painter.setPen(QPen(grad, 1.5))
+            else:
+                painter.setPen(QPen(QColor(theme.border), 1))
+            painter.drawRoundedRect(rect, 12, 12)
+        elif hovered:
             painter.setPen(Qt.NoPen)
             bg = QColor(theme.accent)
             bg.setAlpha(45 if option.state & QStyle.State_Selected else 22)
@@ -131,7 +148,13 @@ class BookCardDelegate(QStyledItemDelegate):
         if book.progress > 0:
             done = QRect(bar)
             done.setWidth(max(4, int(bar.width() * min(book.progress, 1))))
-            painter.setBrush(QColor("#2e9d55") if book.finished else QColor(theme.accent))
+            if book.finished:
+                painter.setBrush(QColor("#2ecc71"))
+            else:
+                grad = QLinearGradient(bar.topLeft(), bar.topRight())
+                grad.setColorAt(0, QColor(theme.accent))
+                grad.setColorAt(1, QColor(theme.accent2))
+                painter.setBrush(grad)
             painter.drawRoundedRect(done, 2, 2)
         painter.setPen(QColor(theme.muted))
         label = "✓ lido" if book.finished else (f"{book.progress:.0%}" if book.progress else "novo")
@@ -242,6 +265,109 @@ class BookGrid(QListWidget):
             self.library.set_in_collection(self.library.create_collection(name), book_id, True)
 
 
+class ProgressRing(QWidget):
+    """Anel de progresso com gradiente."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.value = 0.0
+        self.theme: Theme | None = None
+        self.setFixedSize(92, 92)
+
+    def set_value(self, value: float, theme: Theme) -> None:
+        self.value, self.theme = max(0.0, min(value, 1.0)), theme
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if not self.theme:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(8, 8, self.width() - 16, self.height() - 16)
+        p.setPen(QPen(QColor(self.theme.border), 8, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(r, 0, 360 * 16)
+        grad = QConicalGradient(r.center(), 90)
+        grad.setColorAt(0, QColor(self.theme.accent))
+        grad.setColorAt(1, QColor(self.theme.accent2))
+        p.setPen(QPen(grad, 8, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(r, 90 * 16, -int(360 * 16 * self.value))
+        p.setPen(QColor(self.theme.text))
+        font = QFont()
+        font.setPointSize(13)
+        font.setBold(True)
+        p.setFont(font)
+        p.drawText(self.rect(), Qt.AlignCenter, f"{self.value:.0%}")
+        p.end()
+
+
+class ContinueCard(QFrame):
+    """Destaque com o último livro lido: capa, progresso e botão de retomar."""
+
+    open_requested = Signal(int)
+
+    def __init__(self, library: Library, covers: CoverCache, parent=None):
+        super().__init__(parent)
+        self.setObjectName("hero")
+        self.library, self.covers = library, covers
+        self.book_id: int | None = None
+        self.cover = QLabel()
+        self.cover.setFixedSize(76, 108)
+        self.cover.setAlignment(Qt.AlignCenter)
+        kicker = QLabel("CONTINUE LENDO")
+        kicker.setObjectName("herokicker")
+        self.title = QLabel()
+        self.title.setObjectName("herotitle")
+        self.detail = QLabel()
+        self.detail.setObjectName("muted")
+        resume = QPushButton("▶  Retomar leitura")
+        resume.setObjectName("primary")
+        resume.setCursor(Qt.PointingHandCursor)
+        resume.clicked.connect(lambda: self.book_id and self.open_requested.emit(self.book_id))
+        texts = QVBoxLayout()
+        texts.setSpacing(4)
+        texts.addWidget(kicker)
+        texts.addWidget(self.title)
+        texts.addWidget(self.detail)
+        texts.addSpacing(6)
+        texts.addWidget(resume, 0, Qt.AlignLeft)
+        self.ring = ProgressRing()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 14, 22, 14)
+        layout.setSpacing(18)
+        layout.addWidget(self.cover)
+        layout.addLayout(texts, 1)
+        layout.addWidget(self.ring)
+
+    def show_book(self, book: Book | None, theme: Theme) -> None:
+        self.setVisible(book is not None)
+        if not book:
+            return
+        self.book_id = book.id
+        self.title.setText(book.title)
+        parts = [book.author] if book.author else []
+        if book.pages:
+            parts.append(f"página {book.page + 1} de {book.pages}")
+        if book.reading_seconds > 120 and 0 < book.progress < 1:
+            remaining = book.reading_seconds * (1 - book.progress) / book.progress / 60
+            parts.append(f"~{int(remaining // 60)} h {int(remaining % 60):02d} min restantes"
+                         if remaining >= 60 else f"~{max(int(remaining), 1)} min restantes")
+        self.detail.setText("  ·  ".join(parts))
+        pix = self.covers.get(book.id)
+        if not pix.isNull():
+            scaled = pix.scaled(self.cover.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            rounded = QPixmap(scaled.size())
+            rounded.fill(Qt.transparent)
+            painter = QPainter(rounded)
+            painter.setRenderHint(QPainter.Antialiasing)
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(rounded.rect()), 8, 8)
+            painter.setClipPath(path)
+            painter.drawPixmap(0, 0, scaled)
+            painter.end()
+            self.cover.setPixmap(rounded)
+        self.ring.set_value(book.progress, theme)
+
+
 class LibraryView(QWidget):
     open_requested = Signal(int)
     add_files_requested = Signal()
@@ -261,9 +387,8 @@ class LibraryView(QWidget):
         title.setObjectName("heading")
         self.stats_label = QLabel()
         self.stats_label.setObjectName("muted")
-        self.continue_btn = QPushButton("▶  Continuar leitura")
-        self.continue_btn.setObjectName("primary")
-        self.continue_btn.clicked.connect(self._continue)
+        self.continue_card = ContinueCard(library, covers)
+        self.continue_card.open_requested.connect(self.open_requested.emit)
         self.sync_btn = QPushButton("⟳ Sincronizar")
         self.sync_btn.setToolTip("Procurar livros novos nas pastas da biblioteca")
         self.sync_btn.clicked.connect(self.sync_requested.emit)
@@ -275,10 +400,10 @@ class LibraryView(QWidget):
         header.addLayout(titles)
         header.addStretch(1)
         header.addWidget(self.sync_btn)
-        header.addWidget(self.continue_btn)
         self.menu_btn = QToolButton()
-        self.menu_btn.setText("⋮")
+        self.menu_btn.setText("⋯")
         self.menu_btn.setToolTip("Mais opções")
+        self.menu_btn.setStyleSheet("font-size: 18px; font-weight: 700; padding: 2px 12px;")
         self.menu_btn.setPopupMode(QToolButton.InstantPopup)
         options = QMenu(self.menu_btn)
         options.addAction("Abrir um arquivo avulso…", self.add_files_requested.emit)
@@ -337,6 +462,7 @@ class LibraryView(QWidget):
         layout.setContentsMargins(24, 18, 24, 12)
         layout.setSpacing(12)
         layout.addLayout(header)
+        layout.addWidget(self.continue_card)
         layout.addLayout(controls)
         layout.addWidget(self.sync_label)
         layout.addLayout(self.stack, 1)
@@ -346,6 +472,7 @@ class LibraryView(QWidget):
         self.theme = theme
         self.grid.theme = theme
         self.grid.viewport().update()
+        self.continue_card.ring.set_value(self.continue_card.ring.value, theme)
 
     def set_sync_status(self, text: str) -> None:
         self.sync_label.setText(text)
@@ -401,14 +528,8 @@ class LibraryView(QWidget):
                    "(PDF, EPUB, MOBI, quadrinhos, Word, TXT…) vira sua biblioteca.</p>"))
         self.stack.setCurrentWidget(self.empty if stats["total"] == 0 else self.grid)
         last = self.library.last_read()
-        self.continue_btn.setVisible(last is not None)
-        if last:
-            self.continue_btn.setToolTip(f"{last.title} — {last.progress:.0%}")
+        self.continue_card.show_book(last if last and not last.finished else None, self.theme)
 
     def invalidate_cover(self, book_id: int) -> None:
         self.covers.invalidate(book_id)
 
-    def _continue(self) -> None:
-        last = self.library.last_read()
-        if last:
-            self.open_requested.emit(last.id)

@@ -7,10 +7,10 @@ from bisect import bisect_right
 from collections import OrderedDict
 
 import pymupdf
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QApplication, QGraphicsOpacityEffect, QComboBox, QDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter,
     QTabWidget, QTextBrowser, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -20,7 +20,7 @@ from .annotations_view import COLOR_NAMES, color_icon, save_markdown
 from .documents import LoadedDocument
 from .library import HIGHLIGHT_COLORS, Book, Highlight, Library
 from .speech import Narrator
-from .themes import THEMES, Theme
+from .themes import DEFAULT_THEME, THEMES, Theme
 
 PAGE_GAP = 16          # espaço entre páginas (modo duplo e rolagem contínua)
 VIEW_MARGIN = 24       # margem em volta da página
@@ -29,6 +29,7 @@ TICK_SECONDS = 15
 ZOOM_MODES = {"largura": "Ajustar à largura", "pagina": "Página inteira", "livre": "Zoom livre"}
 SELECTION_COLOR = QColor(60, 130, 255, 85)
 RENDER_AHEAD = 2       # páginas renderizadas além das visíveis na rolagem contínua
+IMMERSIVE_DELAY_MS = 2800  # tempo parado até as barras sumirem na leitura imersiva
 
 
 def merge_line_rects(words: list) -> list[list[float]]:
@@ -111,7 +112,7 @@ class ReaderWidget(QWidget):
         self.two_pages = False
         self.continuous = False
         self.font_size = 12.0
-        self.theme: Theme = THEMES["claro"]
+        self.theme: Theme = THEMES[DEFAULT_THEME]
         self._layout_key = None
         self._layout_version = 0
         self._cache: OrderedDict = OrderedDict()
@@ -155,6 +156,20 @@ class ReaderWidget(QWidget):
         self._visible_timer = QTimer(self, singleShot=True, interval=30, timeout=self._update_visible)
         self._clock = QTimer(self, interval=TICK_SECONDS * 1000, timeout=self._tick)
         self._clock.start()
+
+        # Leitura imersiva: barras esmaecem (sem mudar o tamanho da página).
+        self.immersive = True
+        self._chrome_hidden = False
+        self._chrome_effects = []
+        for bar in (self.toolbar, self.footer):
+            effect = QGraphicsOpacityEffect(bar)
+            effect.setOpacity(1.0)
+            bar.setGraphicsEffect(effect)
+            bar.installEventFilter(self)
+            self._chrome_effects.append(effect)
+        self._chrome_anims: list[QPropertyAnimation] = []
+        self._chrome_timer = QTimer(self, singleShot=True, interval=IMMERSIVE_DELAY_MS,
+                                    timeout=lambda: self._fade_chrome(False))
 
     # ================================================================ UI
     def _build_ui(self) -> None:
@@ -297,7 +312,8 @@ class ReaderWidget(QWidget):
         self.page_edit.returnPressed.connect(self._page_typed)
         self.status_label = QLabel()
         self.status_label.setObjectName("muted")
-        footer = QHBoxLayout()
+        self.footer = QWidget()
+        footer = QHBoxLayout(self.footer)
         footer.setContentsMargins(12, 4, 12, 6)
         footer.addWidget(QLabel("Página"))
         footer.addWidget(self.page_edit)
@@ -309,7 +325,7 @@ class ReaderWidget(QWidget):
         layout.setSpacing(0)
         layout.addWidget(tb)
         layout.addWidget(self.splitter, 1)
-        layout.addLayout(footer)
+        layout.addWidget(self.footer)
 
     def _build_shortcuts(self) -> None:
         bindings = {
@@ -376,6 +392,8 @@ class ReaderWidget(QWidget):
         self._last_interaction = time.monotonic()
         self._pending_seconds = 0
         self.library.mark_opened(book.id)
+        self.immersive = self.library.setting("leitura_imersiva", "1") == "1"
+        self._fade_chrome(True)
         self._apply_mode()
         self.scroll.setFocus()
 
@@ -849,7 +867,30 @@ class ReaderWidget(QWidget):
                 return index, x / zoom, y / zoom
         return None
 
+    def _fade_chrome(self, visible: bool) -> None:
+        """Mostra/esconde as barras com animação; ao mostrar, agenda o próximo esconder."""
+        if visible and self.immersive and self.doc:
+            self._chrome_timer.start()
+        if visible == (not self._chrome_hidden):
+            return
+        if not visible and (not self.immersive or not self.doc or QApplication.activePopupWidget()):
+            return
+        self._chrome_hidden = not visible
+        self._chrome_anims = []
+        for effect in self._chrome_effects:
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setDuration(180 if visible else 600)
+            anim.setStartValue(effect.opacity())
+            anim.setEndValue(1.0 if visible else 0.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.start()
+            self._chrome_anims.append(anim)
+
     def eventFilter(self, obj, event) -> bool:
+        if obj is self.toolbar or obj is getattr(self, "footer", None):  # chega antes do fim do __init__
+            if event.type() in (QEvent.Enter, QEvent.MouseMove):
+                self._fade_chrome(True)
+            return False
         if obj is not self.scroll.viewport() or not self.doc:
             return super().eventFilter(obj, event)
         et = event.type()
@@ -890,6 +931,7 @@ class ReaderWidget(QWidget):
                 return True
         elif et == QEvent.MouseMove:
             gp = event.globalPosition().toPoint()
+            self._fade_chrome(True)
             if self._pan:
                 origin, hx, vy = self._pan
                 delta = gp - origin

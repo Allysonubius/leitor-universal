@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .documents import DEFAULT_FORMAT_GROUPS, FORMAT_GROUPS, find_libreoffice
 from .library import Library
-from .themes import THEMES
+from .themes import DEFAULT_THEME, THEMES
 
 
 @dataclass
@@ -22,29 +22,33 @@ class Preferences:
     recursive: bool = True
     watch: bool = True
     formats: tuple[str, ...] = DEFAULT_FORMAT_GROUPS
-    theme: str = "claro"
+    theme: str = DEFAULT_THEME
     open_last: bool = False
     folders: list[str] = field(default_factory=list)
     voice: str = ""
     voice_rate: float = 0.0
     sync_folder: str = ""
+    native_frame: bool = False
+    immersive: bool = True
 
     @classmethod
     def load(cls, library: Library) -> "Preferences":
         flag = lambda key, default: library.setting(key, "1" if default else "0") == "1"
         formats = library.setting("formatos")
-        theme = library.setting("tema", "claro")
+        theme = library.setting("tema", DEFAULT_THEME)
         return cls(
             recursive=flag("pastas_subpastas", True),
             watch=flag("pastas_monitorar", True),
             formats=tuple(f for f in formats.split(",") if f in FORMAT_GROUPS) if formats is not None
             else DEFAULT_FORMAT_GROUPS,
-            theme=theme if theme in THEMES else "claro",
+            theme=theme if theme in THEMES else DEFAULT_THEME,
             open_last=flag("abrir_ultimo", False),
             folders=library.folders(),
             voice=library.setting("voz", "") or "",
             voice_rate=float(library.setting("voz_velocidade", "0") or 0),
             sync_folder=library.setting("sync_pasta", "") or "",
+            native_frame=flag("moldura_nativa", False),
+            immersive=flag("leitura_imersiva", True),
         )
 
     def save(self, library: Library) -> None:
@@ -56,6 +60,8 @@ class Preferences:
         library.set_setting("voz", self.voice)
         library.set_setting("voz_velocidade", f"{self.voice_rate:.2f}")
         library.set_setting("sync_pasta", self.sync_folder)
+        library.set_setting("moldura_nativa", "1" if self.native_frame else "0")
+        library.set_setting("leitura_imersiva", "1" if self.immersive else "0")
 
 
 def _muted(text: str) -> QLabel:
@@ -152,6 +158,12 @@ class SettingsDialog(QDialog):
         self.open_last_cb = QCheckBox("Abrir o último livro ao iniciar")
         self.open_last_cb.setChecked(prefs.open_last)
         form.addRow(self.open_last_cb)
+        self.immersive_cb = QCheckBox("Leitura imersiva: esconder as barras enquanto você lê")
+        self.immersive_cb.setChecked(prefs.immersive)
+        form.addRow(self.immersive_cb)
+        self.native_frame_cb = QCheckBox("Usar a moldura padrão do Windows (vale ao reabrir o app)")
+        self.native_frame_cb.setChecked(prefs.native_frame)
+        form.addRow(self.native_frame_cb)
 
         voice_box = QGroupBox("Leitura em voz alta")
         vform = QFormLayout(voice_box)
@@ -294,5 +306,7 @@ class SettingsDialog(QDialog):
             voice=self.voice_combo.currentData() or "",
             voice_rate=self.rate_slider.value() / 10,
             sync_folder=self._sync_folder,
+            native_frame=self.native_frame_cb.isChecked(),
+            immersive=self.immersive_cb.isChecked(),
         )
         self.accept()

@@ -32,7 +32,10 @@ uma biblioteca com capas e **lembra exatamente onde você parou**.
   e estimativa de tempo restante em cada livro.
 - **Backup e sincronização**: backup/restauração em `.zip` e sincronização entre PCs por uma
   pasta do OneDrive, Google Drive ou Dropbox (progresso, marcadores, grifos e coleções).
-- Temas **Claro, Sépia e Escuro**, **rolagem contínua**, modo **duas páginas**, zoom (largura,
+- **Visual Futurista** (padrão): janela sem moldura com barra de título própria, destaque
+  “Continue lendo” com anel de progresso, brilho e gradientes, transições suaves e
+  **leitura imersiva** (as barras somem enquanto você lê).
+- Temas **Futurista, Claro, Sépia e Escuro**, **rolagem contínua**, modo **duas páginas**, zoom (largura,
   página inteira, livre, Ctrl + roda), ajuste de fonte, **tela cheia** (F11).
 - **Uma janela só**: abrir um livro pelo Explorer com o app aberto usa a janela existente.
 - Arquivos movidos ou renomeados são reconhecidos pela impressão digital do conteúdo, sem
@@ -184,7 +187,10 @@ leitor_universal/
   single_instance.py   uma janela só (repasse de arquivos)
   scanner.py           sincronização das pastas da biblioteca (em segundo plano)
   settings_dialog.py   tela de Configurações e preferências
-  themes.py            temas da interface e coloração das páginas
+  themes.py            temas, folha de estilo e coloração das páginas
+  titlebar.py          barra de título própria e redimensionamento da janela sem moldura
+  effects.py           transições animadas
+  update_dialog.py     aviso de atualização obrigatória
   updater.py           verificação, download e instalação de atualizações
 packaging/         especificação do PyInstaller, instalador Inno Setup e ícone
 scripts/           publicar.ps1 (nova versão), assinar.ps1, notas_da_versao.py e gerar_icone.py

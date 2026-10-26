@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QSpinBox, QVBoxLayout, QWidget,
 )
@@ -54,6 +54,7 @@ class BarChart(QWidget):
         self.goal: float | None = None
         self.unit = ""
         self.color = QColor("#2f6fde")
+        self.color2 = QColor("#7c3aed")
         self.text_color = QColor("#666")
         self.setMinimumHeight(170)
 
@@ -77,12 +78,18 @@ class BarChart(QWidget):
         for i, value in enumerate(self.values):
             bh = chart_h * value / peak
             x = left + i * slot + (slot - bar_w) / 2
-            color = QColor(self.color)
-            if not value:
-                color.setAlpha(50)
+            bar = QRectF(x, top + chart_h - max(bh, 2), bar_w, max(bh, 2))
+            if value:
+                grad = QLinearGradient(bar.bottomLeft(), bar.topLeft())
+                grad.setColorAt(0, self.color2)
+                grad.setColorAt(1, self.color)
+                p.setBrush(grad)
+            else:
+                faint = QColor(self.color)
+                faint.setAlpha(50)
+                p.setBrush(faint)
             p.setPen(Qt.NoPen)
-            p.setBrush(color)
-            p.drawRoundedRect(QRectF(x, top + chart_h - max(bh, 2), bar_w, max(bh, 2)), 2, 2)
+            p.drawRoundedRect(bar, 3, 3)
             if self.labels and (n <= 12 or i % 5 == 0 or i == n - 1):
                 p.setPen(self.text_color)
                 p.drawText(QRectF(x - 12, h - bottom + 4, bar_w + 24, 14), Qt.AlignCenter, self.labels[i])
@@ -105,7 +112,7 @@ class StatCard(QFrame):
         self.title = QLabel(title)
         self.title.setObjectName("muted")
         self.value = QLabel("—")
-        self.value.setStyleSheet("font-size: 24px; font-weight: 600;")
+        self.value.setStyleSheet("font-size: 26px; font-weight: 700;")
         self.detail = QLabel()
         self.detail.setObjectName("muted")
         layout = QVBoxLayout(self)
@@ -177,9 +184,9 @@ class StatsView(QWidget):
     def set_theme(self, theme: Theme) -> None:
         for chart in (self.days_chart, self.months_chart):
             chart.color = QColor(theme.accent)
+            chart.color2 = QColor(theme.accent2)
             chart.text_color = QColor(theme.muted)
             chart.update()
-        self.setStyleSheet(f"QFrame#card {{ background: {theme.surface}; border-radius: 10px; }}")
 
     def _save_goal(self, key: str, value: int) -> None:
         self.library.set_setting(key, str(value))

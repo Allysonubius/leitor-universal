@@ -5,6 +5,13 @@ Escreva as mudanças em “Não publicado”; o `scripts/publicar.ps1` transform
 
 ## [Não publicado]
 
+- Novo visual Futurista (padrão): fundo azul-noite, destaques em ciano e violeta com gradientes e brilho.
+- Janela sem a moldura do Windows, com barra de título própria; continua encaixando nas bordas da tela e redimensionando pelas bordas. Dá para voltar à moldura padrão nas Configurações.
+- Destaque “Continue lendo” na biblioteca, com capa, página atual, tempo restante e anel de progresso.
+- Leitura imersiva: as barras do leitor somem suavemente quando você para de mexer o mouse e voltam ao movê-lo (pode ser desligada nas Configurações).
+- Transições suaves entre as telas, cartões com brilho ao passar o mouse e gráficos em gradiente.
+- Botões, menus, listas, abas e barras de rolagem redesenhados em todos os temas.
+
 ## [1.3.0] - 2026-10-26
 
 - Nova navegação lateral: Biblioteca, Coleções, Anotações, Estatísticas e Configurações.
