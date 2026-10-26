@@ -5,6 +5,8 @@ Escreva as mudanças em “Não publicado”; o `scripts/publicar.ps1` transform
 
 ## [Não publicado]
 
+## [1.2.1] - 2026-10-26
+
 - Corrigido: Ctrl + roda do mouse agora dá zoom também com o cursor sobre a página, mantendo no lugar o trecho apontado.
 - Corrigido: clicar nas laterais da página para avançar/voltar e arrastar a página ampliada funcionam sobre a página inteira.
 
