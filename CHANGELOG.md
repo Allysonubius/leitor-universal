@@ -5,6 +5,8 @@ Escreva as mudanças em “Não publicado”; o `scripts/publicar.ps1` transform
 
 ## [Não publicado]
 
+## [1.2.0] - 2026-10-26
+
 - Atualizações agora são obrigatórias: ao abrir, o aplicativo instala a versão mais recente antes de continuar.
 - O aviso de atualização mostra as novidades de todas as versões que você ainda não tem, em português.
 - Botões e diálogos do sistema traduzidos para o português.
