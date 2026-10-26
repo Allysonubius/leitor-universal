@@ -10,7 +10,7 @@ from pathlib import Path
 
 import time
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl
+from PySide6.QtCore import QByteArray, QFileSystemWatcher, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QInputDialog, QMainWindow, QMessageBox, QProgressDialog,
@@ -18,14 +18,18 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__, updater
-from .documents import ALL_FORMATS, BOOK_EXTS, is_supported, open_document
+from .documents import ALL_FORMATS, extensions_for, is_supported, open_document
 from .library import Library
 from .library_view import LibraryView
 from .reader import ReaderWidget
+from .scanner import ScanThread
+from .settings_dialog import Preferences, SettingsDialog
 from .themes import THEMES, apply_theme
 
 APP_NAME = "Leitor Universal"
 UPDATE_CHECK_INTERVAL = 12 * 3600  # verificação automática no máximo a cada 12 h
+RESYNC_INTERVAL_MS = 10 * 60 * 1000  # varredura periódica das pastas monitoradas
+MAX_WATCHED_DIRS = 400
 log = logging.getLogger("leitor")
 
 
@@ -45,6 +49,7 @@ class MainWindow(QMainWindow):
     def __init__(self, library: Library):
         super().__init__()
         self.library = library
+        self.prefs = Preferences.load(library)
         self.setWindowTitle(APP_NAME)
         self.setAcceptDrops(True)
         self.resize(1280, 820)
@@ -67,6 +72,8 @@ class MainWindow(QMainWindow):
         lv.edit_requested.connect(self.edit_book)
         lv.check_updates_requested.connect(lambda: self.check_for_updates(manual=True))
         lv.about_requested.connect(self.show_about)
+        lv.settings_requested.connect(self.open_settings)
+        lv.sync_requested.connect(self.start_sync)
         self.reader.back_requested.connect(self.show_library)
         self.reader.fullscreen_requested.connect(self.toggle_fullscreen)
         self.reader.theme_changed.connect(self.set_theme)
@@ -79,7 +86,116 @@ class MainWindow(QMainWindow):
         self._update_thread = None
         self._download_thread = None
         self._download_dialog = None
-        QTimer.singleShot(4000, self._auto_check_updates)
+        if self.prefs.auto_update:
+            QTimer.singleShot(4000, self._auto_check_updates)
+
+        self._scan_thread: ScanThread | None = None
+        self._sync_again = False
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(lambda _: self._sync_debounce.start())
+        self._sync_debounce = QTimer(self, singleShot=True, interval=3000, timeout=self.start_sync)
+        self._resync_timer = QTimer(self, interval=RESYNC_INTERVAL_MS, timeout=self.start_sync)
+        self._status_timer = QTimer(self, singleShot=True, interval=6000,
+                                    timeout=lambda: self.library_view.set_sync_status(""))
+        self._apply_watch()
+        if self.library.folders():
+            QTimer.singleShot(300, self.start_sync)
+
+    # ------------------------------------------------------ pastas e sincronização
+    def _apply_watch(self) -> None:
+        if self._watcher.directories():
+            self._watcher.removePaths(self._watcher.directories())
+        if not self.prefs.watch:
+            self._resync_timer.stop()
+            return
+        dirs: list[str] = []
+        for folder in self.library.folders():
+            if not Path(folder).is_dir():
+                continue
+            dirs.append(folder)
+            if self.prefs.recursive:
+                for root, subdirs, _ in os.walk(folder, onerror=lambda _: None):
+                    subdirs[:] = [d for d in subdirs if not d.startswith(".")]
+                    dirs.extend(os.path.join(root, d) for d in subdirs)
+                    if len(dirs) >= MAX_WATCHED_DIRS:
+                        break
+        if dirs:
+            self._watcher.addPaths(dirs[:MAX_WATCHED_DIRS])
+        self._resync_timer.start()
+
+    def start_sync(self) -> None:
+        if not self.library.folders():
+            return
+        if self._scan_thread and self._scan_thread.isRunning():
+            self._sync_again = True
+            return
+        self._status_timer.stop()
+        self.library_view.set_sync_status("Sincronizando a biblioteca…")
+        thread = ScanThread(self.library.data_dir, extensions_for(self.prefs.formats), self.prefs.recursive, self)
+        thread.progress.connect(self._on_sync_progress)
+        thread.finished_scan.connect(self._on_sync_finished)
+        self._scan_thread = thread
+        thread.start()
+
+    def _on_sync_progress(self, done: int, total: int, name: str) -> None:
+        if total:
+            self.library_view.set_sync_status(f"Sincronizando… {done} de {total}  {name}")
+
+    def _on_sync_finished(self, result) -> None:
+        parts = []
+        if result.added:
+            parts.append(f"{result.added} livro(s) novo(s)")
+        if result.updated:
+            parts.append(f"{result.updated} atualizado(s)")
+        if result.missing:
+            parts.append(f"{result.missing} arquivo(s) não encontrado(s)")
+        if result.errors:
+            parts.append(f"{len(result.errors)} arquivo(s) não puderam ser lidos (detalhes em leitor.log)")
+        self.library_view.set_sync_status(
+            "Biblioteca sincronizada: " + ", ".join(parts) + "." if parts else "")
+        if parts:
+            self._status_timer.start()
+        if self.stack.currentWidget() is self.library_view:
+            self.library_view.refresh()
+        self._apply_watch()
+        if self._sync_again:
+            self._sync_again = False
+            QTimer.singleShot(500, self.start_sync)
+
+    def add_library_folder(self, folder: str) -> None:
+        self.library.add_folder(folder)
+        self.prefs.folders = self.library.folders()
+        self.library_view.refresh()
+        self._apply_watch()
+        self.start_sync()
+
+    def open_settings(self) -> None:
+        dialog = SettingsDialog(Preferences.load(self.library), self)
+        if dialog.exec() != SettingsDialog.Accepted:
+            return
+        old, new = self.prefs, dialog.prefs
+        for folder in dialog.removed_folders:
+            self.library.remove_folder(folder)
+        for folder in new.folders:
+            if folder not in old.folders:
+                self.library.add_folder(folder)
+        new.save(self.library)
+        new.folders = self.library.folders()
+        self.prefs = new
+        if new.theme != old.theme:
+            self.set_theme(new.theme)
+        self._apply_watch()
+        self.library_view.refresh()
+        if (new.folders != old.folders or new.formats != old.formats
+                or new.recursive != old.recursive):
+            self.start_sync()
+        if dialog.check_updates_now:
+            self.check_for_updates(manual=True)
+
+    def open_last_book(self) -> None:
+        last = self.library.last_read()
+        if last:
+            self.open_book(last.id)
 
     # ------------------------------------------------------- atualizações
     def _auto_check_updates(self) -> None:
@@ -218,12 +334,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{book.title} — {APP_NAME}")
 
     def open_paths(self, paths: list[str]) -> None:
-        """Importa arquivos/pastas; se houver um único arquivo, já abre para leitura."""
+        """Pastas viram pastas da biblioteca; arquivos são importados (um único já abre)."""
         files: list[Path] = []
         for raw in paths:
             p = Path(raw)
             if p.is_dir():
-                files.extend(f for f in sorted(p.rglob("*")) if f.suffix.lower() in BOOK_EXTS)
+                self.add_library_folder(str(p))
             elif p.is_file():
                 files.append(p)
         if not files:
@@ -273,10 +389,10 @@ class MainWindow(QMainWindow):
 
     def choose_folder(self) -> None:
         start = self.library.setting("ultima_pasta", str(Path.home()))
-        folder = QFileDialog.getExistingDirectory(self, "Adicionar pasta de livros", start)
+        folder = QFileDialog.getExistingDirectory(self, "Escolha a pasta onde ficam seus livros", start)
         if folder:
             self.library.set_setting("ultima_pasta", folder)
-            self.open_paths([folder])
+            self.add_library_folder(folder)
 
     # ------------------------------------------------------- gerenciamento
     def remove_book(self, book_id: int) -> None:
@@ -326,6 +442,9 @@ class MainWindow(QMainWindow):
             self.open_paths(paths)
 
     def closeEvent(self, event) -> None:
+        if self._scan_thread and self._scan_thread.isRunning():
+            self._scan_thread.requestInterruption()
+            self._scan_thread.wait(5000)
         self.reader.close_book()
         self.library.set_setting("geometria", bytes(self.saveGeometry().toBase64()).decode())
         self.library.close()
@@ -361,4 +480,6 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
     if len(argv) > 1:
         window.open_paths(argv[1:])
+    elif window.prefs.open_last:
+        QTimer.singleShot(0, window.open_last_book)
     return app.exec()

@@ -1,6 +1,8 @@
 """Tela da biblioteca: estante com capas, progresso, busca, filtros e ordenação."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
@@ -9,7 +11,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .library import Book, Library
+from .library import Book, Library, is_inside
 from .themes import Theme
 
 CARD_W, CARD_H, COVER_H = 176, 318, 236
@@ -149,6 +151,8 @@ class LibraryView(QWidget):
     edit_requested = Signal(int)
     check_updates_requested = Signal()
     about_requested = Signal()
+    settings_requested = Signal()
+    sync_requested = Signal()
 
     def __init__(self, library: Library, theme: Theme, parent=None):
         super().__init__(parent)
@@ -163,10 +167,11 @@ class LibraryView(QWidget):
         self.continue_btn = QPushButton("▶  Continuar leitura")
         self.continue_btn.setObjectName("primary")
         self.continue_btn.clicked.connect(self._continue)
-        add_files = QPushButton("＋ Adicionar livros")
-        add_files.clicked.connect(self.add_files_requested.emit)
-        add_folder = QPushButton("📁 Adicionar pasta")
-        add_folder.clicked.connect(self.add_folder_requested.emit)
+        self.sync_btn = QPushButton("⟳ Sincronizar")
+        self.sync_btn.setToolTip("Procurar livros novos nas pastas da biblioteca")
+        self.sync_btn.clicked.connect(self.sync_requested.emit)
+        settings_btn = QPushButton("⚙ Configurações")
+        settings_btn.clicked.connect(self.settings_requested.emit)
 
         header = QHBoxLayout()
         titles = QVBoxLayout()
@@ -174,14 +179,15 @@ class LibraryView(QWidget):
         titles.addWidget(self.stats_label)
         header.addLayout(titles)
         header.addStretch(1)
-        header.addWidget(add_folder)
-        header.addWidget(add_files)
+        header.addWidget(self.sync_btn)
+        header.addWidget(settings_btn)
         header.addWidget(self.continue_btn)
         self.menu_btn = QToolButton()
         self.menu_btn.setText("⋮")
         self.menu_btn.setToolTip("Mais opções")
         self.menu_btn.setPopupMode(QToolButton.InstantPopup)
         options = QMenu(self.menu_btn)
+        options.addAction("Abrir um arquivo avulso…", self.add_files_requested.emit)
         options.addAction("Verificar atualizações", self.check_updates_requested.emit)
         options.addAction("Sobre o Leitor Universal", self.about_requested.emit)
         self.menu_btn.setMenu(options)
@@ -195,12 +201,16 @@ class LibraryView(QWidget):
         for key, label in FILTERS.items():
             self.filter_combo.addItem(label, key)
         self.filter_combo.currentIndexChanged.connect(self.refresh)
+        self.folder_combo = QComboBox()
+        self.folder_combo.setMinimumWidth(160)
+        self.folder_combo.currentIndexChanged.connect(self.refresh)
         self.sort_combo = QComboBox()
         for key, (label, _, _) in SORTS.items():
             self.sort_combo.addItem(label, key)
         self.sort_combo.currentIndexChanged.connect(self.refresh)
         controls = QHBoxLayout()
         controls.addWidget(self.search, 1)
+        controls.addWidget(self.folder_combo)
         controls.addWidget(self.filter_combo)
         controls.addWidget(self.sort_combo)
 
@@ -218,15 +228,21 @@ class LibraryView(QWidget):
         self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
         self.grid.customContextMenuRequested.connect(self._context_menu)
 
-        self.empty = QLabel(
-            "<div style='font-size:42px'>📚</div>"
-            "<p style='font-size:16px'><b>Sua biblioteca está vazia</b></p>"
-            "<p>Arraste arquivos ou pastas para esta janela,<br/>ou use “Adicionar livros”.</p>"
-            "<p style='font-size:11px'>PDF · EPUB · MOBI/AZW · FB2 · XPS · CBZ/CBR · DOCX · TXT · MD · RTF · "
-            "HTML · imagens · DOC/ODT/PPTX (com LibreOffice)</p>"
-        )
-        self.empty.setAlignment(Qt.AlignCenter)
-        self.empty.setObjectName("muted")
+        self.empty = QWidget()
+        self.empty_text = QLabel()
+        self.empty_text.setAlignment(Qt.AlignCenter)
+        self.empty_text.setObjectName("muted")
+        self.empty_btn = QPushButton("📁  Escolher pasta de livros")
+        self.empty_btn.setObjectName("primary")
+        self.empty_btn.clicked.connect(self.add_folder_requested.emit)
+        empty_layout = QVBoxLayout(self.empty)
+        empty_layout.addStretch(1)
+        empty_layout.addWidget(self.empty_text)
+        empty_layout.addWidget(self.empty_btn, 0, Qt.AlignCenter)
+        empty_layout.addStretch(2)
+        self.sync_label = QLabel()
+        self.sync_label.setObjectName("muted")
+        self.sync_label.hide()
         self.stack = QStackedLayout()
         self.stack.addWidget(self.grid)
         self.stack.addWidget(self.empty)
@@ -236,6 +252,7 @@ class LibraryView(QWidget):
         layout.setSpacing(12)
         layout.addLayout(header)
         layout.addLayout(controls)
+        layout.addWidget(self.sync_label)
         layout.addLayout(self.stack, 1)
         self.refresh()
 
@@ -251,8 +268,32 @@ class LibraryView(QWidget):
             self._covers[book.id] = pix
         return self._covers[book.id]
 
+    def set_sync_status(self, text: str) -> None:
+        self.sync_label.setText(text)
+        self.sync_label.setVisible(bool(text))
+        self.sync_btn.setEnabled(not text.startswith("Sincronizando"))
+
+    def _reload_folders(self) -> None:
+        current = self.folder_combo.currentData()
+        self.folder_combo.blockSignals(True)
+        self.folder_combo.clear()
+        self.folder_combo.addItem("Todas as pastas", None)
+        for folder in self.library.folders():
+            self.folder_combo.addItem("📁 " + (Path(folder).name or folder), folder)
+        self.folder_combo.addItem("Arquivos avulsos", "")
+        index = self.folder_combo.findData(current)
+        self.folder_combo.setCurrentIndex(max(index, 0))
+        self.folder_combo.blockSignals(False)
+
     def refresh(self) -> None:
+        self._reload_folders()
         books = self.library.all_books()
+        folder = self.folder_combo.currentData()
+        if folder:
+            books = [b for b in books if is_inside(b.path, folder)]
+        elif folder == "":
+            folders = self.library.folders()
+            books = [b for b in books if not any(is_inside(b.path, f) for f in folders)]
         query = self.search.text().strip().lower()
         if query:
             books = [b for b in books if query in f"{b.title} {b.author} {b.kind}".lower()]
@@ -277,6 +318,16 @@ class LibraryView(QWidget):
             f"{stats['total']} livro(s)  ·  {stats['finished']} concluído(s)  ·  "
             f"{hours:.1f} h de leitura registradas"
         )
+        has_folders = bool(self.library.folders())
+        if stats["total"] == 0:
+            self.empty_text.setText(
+                "<div style='font-size:42px'>📚</div>"
+                + ("<p style='font-size:16px'><b>Nenhum livro encontrado nas suas pastas</b></p>"
+                   "<p>Verifique os formatos em Configurações ou escolha outra pasta.</p>"
+                   if has_folders else
+                   "<p style='font-size:16px'><b>Bem-vindo ao Leitor Universal</b></p>"
+                   "<p>Escolha a pasta onde ficam seus livros. Tudo o que estiver nela<br/>"
+                   "(PDF, EPUB, MOBI, quadrinhos, Word, TXT…) vira sua biblioteca.</p>"))
         self.stack.setCurrentWidget(self.empty if stats["total"] == 0 else self.grid)
         last = self.library.last_read()
         self.continue_btn.setVisible(last is not None)

@@ -5,8 +5,14 @@ uma biblioteca com capas e **lembra exatamente onde você parou**.
 
 ## Recursos
 
-- **Abertura universal**: arraste arquivos ou pastas para a janela, use “Adicionar livros”
-  ou “Abrir com → LeitorUniversal.bat”.
+- **Biblioteca por pastas**: no primeiro uso, escolha a pasta onde ficam seus livros. Tudo o
+  que estiver nela (e nas subpastas) vira a biblioteca, em qualquer formato. Arquivos novos
+  aparecem sozinhos; arquivos apagados somem da estante sem perder o progresso (se voltarem,
+  o progresso volta junto). Pastas em pen drives desconectados não são afetadas.
+- **Configurações** (⚙): pastas da biblioteca, subpastas, monitoramento automático, formatos
+  incluídos, tema, abrir o último livro ao iniciar e atualizações automáticas.
+- **Abertura avulsa**: arraste um arquivo para a janela, use **⋮ → Abrir um arquivo avulso** ou
+  “Abrir com”. Arrastar uma pasta a adiciona à biblioteca.
 - **Retomada automática**: cada livro reabre na última página lida. Em livros refluíveis
   (EPUB, MOBI, TXT, DOCX…) a posição é salva por capítulo, então continua correta mesmo
   depois de mudar o tamanho da fonte ou da janela.
@@ -132,6 +138,8 @@ leitor_universal/
   library.py       persistência SQLite (livros, progresso, marcadores, preferências)
   library_view.py  estante com capas, filtros e ordenação
   reader.py        renderização, navegação, sumário, marcadores, busca, tempo de leitura
+  scanner.py       sincronização das pastas da biblioteca (em segundo plano)
+  settings_dialog.py  tela de Configurações e preferências
   themes.py        temas da interface e coloração das páginas
   updater.py       verificação, download e instalação de atualizações
 packaging/         especificação do PyInstaller, instalador Inno Setup e ícone

@@ -58,6 +58,7 @@ def apply_theme(app: QApplication, theme: Theme) -> None:
         QToolButton {{ padding: 4px 8px; border-radius: 6px; }}
         QToolButton:hover {{ background: {theme.reader_bg}; }}
         QToolButton:checked {{ background: {theme.accent}; color: white; }}
+        QToolButton::menu-indicator {{ image: none; width: 0; }}
         QPushButton {{ padding: 6px 12px; border-radius: 6px; border: 1px solid {theme.reader_bg};
                        background: {theme.surface}; }}
         QPushButton:hover {{ border-color: {theme.accent}; }}

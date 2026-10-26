@@ -43,6 +43,20 @@ ALL_FORMATS = {**NATIVE_FORMATS, **CONVERTED_FORMATS, **OFFICE_FORMATS}
 # Formatos considerados "livros" ao varrer pastas (imagens soltas ficam de fora).
 BOOK_EXTS = set(ALL_FORMATS) - IMAGE_EXTS - {".svg", ".zip", ".html", ".htm"}
 
+# Grupos exibidos nas Configurações para escolher o que entra na biblioteca.
+FORMAT_GROUPS: dict[str, tuple[str, set[str]]] = {
+    "pdf": ("PDF e XPS", {".pdf", ".xps", ".oxps"}),
+    "ebook": ("E-books (EPUB, MOBI, AZW, FB2)", {".epub", ".mobi", ".prc", ".azw", ".azw3", ".fb2", ".fbz"}),
+    "quadrinhos": ("Quadrinhos (CBZ, CBR)", {".cbz", ".cbr"}),
+    "texto": ("Textos (TXT, Markdown, RTF)", {".txt", ".text", ".md", ".markdown", ".rtf"}),
+    "office": ("Documentos (DOCX, DOC, ODT, PPTX…)", {".docx"} | set(OFFICE_FORMATS)),
+}
+DEFAULT_FORMAT_GROUPS = tuple(FORMAT_GROUPS)
+
+
+def extensions_for(groups) -> set[str]:
+    return set().union(*(FORMAT_GROUPS[g][1] for g in groups if g in FORMAT_GROUPS))
+
 READING_CSS = """
 body { font-family: serif; line-height: 1.5; text-align: justify; margin: 0; }
 p { margin: 0 0 0.7em 0; text-indent: 1.2em; }

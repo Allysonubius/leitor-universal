@@ -1,6 +1,7 @@
 """Biblioteca persistente (SQLite): livros, progresso de leitura, marcadores e preferências."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,7 +30,15 @@ CREATE TABLE IF NOT EXISTS books (
     reading_seconds INTEGER DEFAULT 0,
     added_at        TEXT,
     last_opened     TEXT,
-    cover           BLOB
+    cover           BLOB,
+    size            INTEGER DEFAULT 0,
+    mtime           REAL DEFAULT 0,
+    missing         INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS folders (
+    id       INTEGER PRIMARY KEY,
+    path     TEXT UNIQUE NOT NULL,
+    added_at TEXT
 );
 CREATE TABLE IF NOT EXISTS bookmarks (
     id         INTEGER PRIMARY KEY,
@@ -45,6 +54,18 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 """
+# Colunas adicionadas depois da 1.0.0 (bancos antigos são migrados ao abrir).
+MIGRATIONS = {
+    "size": "ALTER TABLE books ADD COLUMN size INTEGER DEFAULT 0",
+    "mtime": "ALTER TABLE books ADD COLUMN mtime REAL DEFAULT 0",
+    "missing": "ALTER TABLE books ADD COLUMN missing INTEGER DEFAULT 0",
+}
+
+
+def is_inside(path: str, folder: str) -> bool:
+    """Compara caminhos sem tocar no disco (funciona com unidades desconectadas)."""
+    p, f = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+    return p == f or p.startswith(f.rstrip("\\/") + os.sep)
 
 
 def _now() -> str:
@@ -73,6 +94,9 @@ class Book:
     added_at: str | None
     last_opened: str | None
     cover: bytes | None
+    size: int = 0
+    mtime: float = 0
+    missing: bool = False
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Book":
@@ -80,6 +104,7 @@ class Book:
         data["two_pages"] = bool(data["two_pages"])
         data["favorite"] = bool(data["favorite"])
         data["finished"] = bool(data["finished"])
+        data["missing"] = bool(data["missing"])
         return cls(**data)
 
     @property
@@ -105,22 +130,29 @@ class Library:
         self.data_dir = data_dir
         self.cache_dir = data_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(data_dir / "biblioteca.db")
+        self.conn = sqlite3.connect(data_dir / "biblioteca.db", timeout=15)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(books)")}
+        for column, ddl in MIGRATIONS.items():
+            if column not in columns:
+                self.conn.execute(ddl)
         self.conn.commit()
 
     # ------------------------------------------------------------- livros
     def import_file(self, path: str | Path) -> Book:
         """Adiciona o arquivo à biblioteca (ou reencontra-o, mesmo se movido)."""
         p = Path(path).resolve()
+        stat = p.stat()
         fp = fingerprint(p)
         existing = self.conn.execute("SELECT * FROM books WHERE fingerprint = ?", (fp,)).fetchone()
         if existing:
-            if existing["path"] != str(p):
-                self.conn.execute("UPDATE books SET path = ? WHERE id = ?", (str(p), existing["id"]))
-                self.conn.commit()
+            self.conn.execute(
+                "UPDATE books SET path = ?, size = ?, mtime = ?, missing = 0 WHERE id = ?",
+                (str(p), stat.st_size, stat.st_mtime, existing["id"]))
+            self.conn.commit()
             return self.get(existing["id"])
 
         loaded = open_document(p, self.cache_dir)
@@ -128,26 +160,43 @@ class Library:
             cover = render_cover(loaded.doc)
         except Exception:
             cover = None
-        cur = self.conn.execute(
-            "INSERT INTO books (fingerprint, path, title, author, kind, pages, added_at, cover)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (fp, str(p), loaded.title, loaded.author, loaded.kind, loaded.doc.page_count, _now(), cover),
-        )
+        same_path = self.conn.execute("SELECT id FROM books WHERE path = ?", (str(p),)).fetchone()
+        if same_path:
+            # O arquivo foi editado no lugar: mantém progresso e marcadores.
+            self.conn.execute(
+                "UPDATE books SET fingerprint = ?, title = ?, author = ?, kind = ?, pages = ?, cover = ?,"
+                " size = ?, mtime = ?, missing = 0 WHERE id = ?",
+                (fp, loaded.title, loaded.author, loaded.kind, loaded.doc.page_count, cover,
+                 stat.st_size, stat.st_mtime, same_path["id"]))
+            book_id = same_path["id"]
+        else:
+            cur = self.conn.execute(
+                "INSERT INTO books (fingerprint, path, title, author, kind, pages, added_at, cover, size, mtime)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (fp, str(p), loaded.title, loaded.author, loaded.kind, loaded.doc.page_count, _now(),
+                 cover, stat.st_size, stat.st_mtime),
+            )
+            book_id = cur.lastrowid
         self.conn.commit()
         loaded.doc.close()
-        return self.get(cur.lastrowid)
+        return self.get(book_id)
 
     def get(self, book_id: int) -> Book | None:
         row = self.conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
         return Book.from_row(row) if row else None
 
-    def all_books(self) -> list[Book]:
-        rows = self.conn.execute("SELECT * FROM books").fetchall()
-        return [Book.from_row(r) for r in rows]
+    def all_books(self, include_missing: bool = False) -> list[Book]:
+        sql = "SELECT * FROM books" if include_missing else "SELECT * FROM books WHERE missing = 0"
+        return [Book.from_row(r) for r in self.conn.execute(sql).fetchall()]
+
+    def set_missing(self, book_id: int, missing: bool) -> None:
+        self.conn.execute("UPDATE books SET missing = ? WHERE id = ?", (int(missing), book_id))
+        self.conn.commit()
 
     def last_read(self) -> Book | None:
         row = self.conn.execute(
-            "SELECT * FROM books WHERE last_opened IS NOT NULL ORDER BY last_opened DESC LIMIT 1"
+            "SELECT * FROM books WHERE last_opened IS NOT NULL AND missing = 0"
+            " ORDER BY last_opened DESC LIMIT 1"
         ).fetchone()
         return Book.from_row(row) if row else None
 
@@ -196,9 +245,32 @@ class Library:
     def stats(self) -> dict:
         row = self.conn.execute(
             "SELECT COUNT(*) AS total, COALESCE(SUM(finished), 0) AS finished,"
-            " COALESCE(SUM(reading_seconds), 0) AS seconds FROM books"
+            " COALESCE(SUM(reading_seconds), 0) AS seconds FROM books WHERE missing = 0"
         ).fetchone()
         return dict(row)
+
+    # -------------------------------------------------------------- pastas
+    def folders(self) -> list[str]:
+        return [r["path"] for r in self.conn.execute("SELECT path FROM folders ORDER BY path")]
+
+    def add_folder(self, path: str | Path) -> str:
+        folder = str(Path(path).resolve())
+        self.conn.execute("INSERT OR IGNORE INTO folders (path, added_at) VALUES (?, ?)", (folder, _now()))
+        self.conn.commit()
+        return folder
+
+    def remove_folder(self, path: str, remove_books: bool = True) -> int:
+        """Remove a pasta; livros que não pertencem a outra pasta saem da biblioteca."""
+        self.conn.execute("DELETE FROM folders WHERE path = ?", (path,))
+        removed = 0
+        if remove_books:
+            others = self.folders()
+            for book in self.all_books(include_missing=True):
+                if is_inside(book.path, path) and not any(is_inside(book.path, o) for o in others):
+                    self.conn.execute("DELETE FROM books WHERE id = ?", (book.id,))
+                    removed += 1
+        self.conn.commit()
+        return removed
 
     # ---------------------------------------------------------- marcadores
     def bookmarks(self, book_id: int) -> list[Bookmark]:
