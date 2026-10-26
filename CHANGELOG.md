@@ -5,6 +5,8 @@ Escreva as mudanças em “Não publicado”; o `scripts/publicar.ps1` transform
 
 ## [Não publicado]
 
+## [1.3.0] - 2026-10-26
+
 - Nova navegação lateral: Biblioteca, Coleções, Anotações, Estatísticas e Configurações.
 - Rolagem contínua: as páginas seguem uma após a outra, como em um site (botão “Contínuo”).
 - Selecione texto com o mouse para copiar (Ctrl+C), grifar em quatro cores, anotar, ver a definição no dicionário ou traduzir.
