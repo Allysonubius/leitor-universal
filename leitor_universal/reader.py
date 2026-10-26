@@ -153,6 +153,7 @@ class ReaderWidget(QWidget):
         self.scroll.setWidget(self.page_label)
         self.scroll.setFrameShape(QScrollArea.NoFrame)
         self.scroll.viewport().installEventFilter(self)
+        self.page_label.installEventFilter(self)
         self.scroll.viewport().setMouseTracking(True)
 
         self.splitter = QSplitter(Qt.Horizontal)
@@ -505,15 +506,30 @@ class ReaderWidget(QWidget):
             self._relayout()
             self.render()
 
+    def _zoom_at(self, factor: float, global_pos: QPoint) -> None:
+        """Zoom mantendo sob o cursor o mesmo ponto da página."""
+        viewport = self.scroll.viewport()
+        hbar, vbar = self.scroll.horizontalScrollBar(), self.scroll.verticalScrollBar()
+        cursor = viewport.mapFromGlobal(global_pos)
+        old_w, old_h = max(self.page_label.width(), 1), max(self.page_label.height(), 1)
+        fx, fy = (hbar.value() + cursor.x()) / old_w, (vbar.value() + cursor.y()) / old_h
+        self._zoom_by(factor)
+        QApplication.processEvents()  # aplica o novo tamanho da página antes de reposicionar
+        hbar.setValue(int(fx * self.page_label.width() - cursor.x()))
+        vbar.setValue(int(fy * self.page_label.height() - cursor.y()))
+
     def eventFilter(self, obj, event) -> bool:
-        if obj is not self.scroll.viewport() or not self.doc:
+        # Os eventos chegam à página (QLabel) quando o cursor está sobre ela e à
+        # viewport quando está na margem; ambos são tratados aqui.
+        if obj not in (self.scroll.viewport(), self.page_label) or not self.doc:
             return super().eventFilter(obj, event)
         et = event.type()
         if et == QEvent.Wheel:
             self._touch()
-            dy = event.angleDelta().y()
+            dy = event.angleDelta().y() or event.angleDelta().x()
             if event.modifiers() & Qt.ControlModifier:
-                self._zoom_by(1.1 if dy > 0 else 1 / 1.1)
+                if dy:
+                    self._zoom_at(1.1 ** (dy / 120), event.globalPosition().toPoint())
                 return True
             bar = self.scroll.verticalScrollBar()
             at_end = bar.value() >= bar.maximum()
@@ -528,21 +544,23 @@ class ReaderWidget(QWidget):
                     self.prev_page(at_bottom=True)
                 return True
             self._wheel_accum = 0
+        # Posições globais: a página se move durante o arraste, a tela não.
         elif et == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-            self._drag_origin = event.position().toPoint()
+            self._drag_origin = event.globalPosition().toPoint()
             self._drag_scroll = (self.scroll.horizontalScrollBar().value(),
                                  self.scroll.verticalScrollBar().value())
             return True
         elif et == QEvent.MouseMove and self._drag_origin is not None:
-            delta = event.position().toPoint() - self._drag_origin
+            delta = event.globalPosition().toPoint() - self._drag_origin
             self.scroll.horizontalScrollBar().setValue(self._drag_scroll[0] - delta.x())
             self.scroll.verticalScrollBar().setValue(self._drag_scroll[1] - delta.y())
             return True
         elif et == QEvent.MouseButtonRelease and self._drag_origin is not None:
-            moved = (event.position().toPoint() - self._drag_origin).manhattanLength()
+            moved = (event.globalPosition().toPoint() - self._drag_origin).manhattanLength()
             self._drag_origin = None
             if moved < 6:
-                x = event.position().x() / max(self.scroll.viewport().width(), 1)
+                viewport = self.scroll.viewport()
+                x = viewport.mapFromGlobal(event.globalPosition().toPoint()).x() / max(viewport.width(), 1)
                 if x < 0.3:
                     self.prev_page()
                 elif x > 0.7:

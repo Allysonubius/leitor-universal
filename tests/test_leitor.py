@@ -71,6 +71,34 @@ def test_busca_encontra_termo(amostras: Path, tmp_path: Path, qapp):
     assert leitor.page_index == 17
 
 
+def test_ctrl_roda_do_mouse_faz_zoom_sobre_a_pagina(amostras: Path, tmp_path: Path, qapp):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtWidgets import QApplication
+    from leitor_universal.app import MainWindow
+
+    lib = Library(tmp_path / "dados")
+    janela = MainWindow(lib)
+    janela.resize(1200, 800)
+    janela.show()
+    janela.open_book(lib.import_file(amostras / "teste.pdf").id)
+    leitor = janela.reader
+
+    def girar(alvo, delta):
+        pos = QPointF(alvo.width() / 2, alvo.height() / 2)
+        QApplication.sendEvent(alvo, QWheelEvent(pos, alvo.mapToGlobal(pos), QPoint(), QPoint(0, delta),
+                                                 Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False))
+
+    inicial = leitor._effective_zoom()
+    pagina = leitor.page_index
+    girar(leitor.page_label, 120)          # cursor sobre a página
+    ampliado = leitor._effective_zoom()
+    assert ampliado > inicial and leitor.zoom_mode == "livre"
+    girar(leitor.scroll.viewport(), -240)  # cursor na margem
+    assert leitor._effective_zoom() < ampliado
+    assert leitor.page_index == pagina     # Ctrl + roda não troca de página
+
+
 @pytest.mark.parametrize("candidata,atual,esperado", [
     ("1.0.1", "1.0.0", True), ("1.10.0", "1.9.9", True), ("1.0.0", "1.0.0", False),
     ("0.9.0", "1.0.0", False), ("v2.0.0", "1.5.3", True),
