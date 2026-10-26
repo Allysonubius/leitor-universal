@@ -611,6 +611,7 @@ class MainWindow(QMainWindow):
             self._scan_thread.requestInterruption()
             self._scan_thread.wait(5000)
         self.reader.close_book()
+        self.reader.narrator.shutdown()
         self.library.set_setting("geometria", bytes(self.saveGeometry().toBase64()).decode())
         if not self._restore_path:
             self.cloud_sync()

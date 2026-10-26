@@ -42,24 +42,49 @@ class Narrator(QObject):
         super().__init__(parent)
         self._queue: list[str] = []
         self._active = False
-        self.engine = None
+        self._engines = engines
+        self._engine = None
+        self._tried = False
+
+    @property
+    def engine(self):
+        """O motor é criado só no primeiro uso (abrir o app fica mais leve)."""
+        if not self._tried:
+            self._tried = True
+            self._engine = self._create_engine()
+        return self._engine
+
+    def _create_engine(self):
         if QTextToSpeech is None:
-            return
-        for name in engines:
+            return None
+        names = [n for n in self._engines if not n or n in QTextToSpeech.availableEngines()]
+        for name in names:
             try:
                 engine = QTextToSpeech(name, self) if name else QTextToSpeech(self)
             except Exception:
                 continue
             if engine.state() != QTextToSpeech.State.Error:
-                self.engine = engine
-                break
-        if self.engine:
-            self.engine.stateChanged.connect(self._on_state)
-            self._pick_portuguese_voice()
+                engine.stateChanged.connect(self._on_state)
+                self._engine = engine
+                self._pick_portuguese_voice()
+                return engine
+            engine.deleteLater()
+        return None
 
     @property
     def available(self) -> bool:
-        return self.engine is not None
+        """Verificação barata, sem criar o motor."""
+        if self._tried:
+            return self._engine is not None
+        return QTextToSpeech is not None and any(
+            n in QTextToSpeech.availableEngines() for n in self._engines if n)
+
+    def shutdown(self) -> None:
+        """Libera o motor antes de o aplicativo encerrar."""
+        self.stop()
+        if self._engine is not None:
+            self._engine.deleteLater()
+            self._engine = None
 
     def voices(self) -> list[str]:
         return [v.name() for v in self.engine.availableVoices()] if self.engine else []
@@ -96,8 +121,8 @@ class Narrator(QObject):
     def stop(self) -> None:
         self._active = False
         self._queue = []
-        if self.engine:
-            self.engine.stop()
+        if self._engine:
+            self._engine.stop()
 
     @property
     def speaking(self) -> bool:
