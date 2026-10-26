@@ -5,6 +5,8 @@ Escreva as mudanças em “Não publicado”; o `scripts/publicar.ps1` transform
 
 ## [Não publicado]
 
+## [1.4.0] - 2026-10-26
+
 - Novo visual Futurista (padrão): fundo azul-noite, destaques em ciano e violeta com gradientes e brilho.
 - Janela sem a moldura do Windows, com barra de título própria; continua encaixando nas bordas da tela e redimensionando pelas bordas. Dá para voltar à moldura padrão nas Configurações.
 - Destaque “Continue lendo” na biblioteca, com capa, página atual, tempo restante e anel de progresso.
