@@ -85,9 +85,12 @@ def test_ctrl_roda_do_mouse_faz_zoom_sobre_a_pagina(amostras: Path, tmp_path: Pa
     leitor = janela.reader
 
     def girar(alvo, delta):
-        pos = QPointF(alvo.width() / 2, alvo.height() / 2)
-        QApplication.sendEvent(alvo, QWheelEvent(pos, alvo.mapToGlobal(pos), QPoint(), QPoint(0, delta),
-                                                 Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False))
+        # Entregue pela janela (como o sistema faz), e não direto ao widget.
+        centro = alvo.mapToGlobal(QPointF(alvo.width() / 2, alvo.height() / 2))
+        local = QPointF(janela.mapFromGlobal(centro.toPoint()))
+        QApplication.sendEvent(janela.windowHandle(), QWheelEvent(
+            local, centro, QPoint(), QPoint(0, delta), Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False))
+        QApplication.processEvents()
 
     inicial = leitor._effective_zoom()
     pagina = leitor.page_index

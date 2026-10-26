@@ -77,6 +77,14 @@ def apply_theme(app: QApplication, theme: Theme) -> None:
         QSlider::sub-page:horizontal {{ background: {theme.accent}; border-radius: 2px; }}
         QSlider::handle:horizontal {{ background: {theme.accent}; width: 14px; margin: -6px 0;
                        border-radius: 7px; }}
+        QProgressBar {{ border: none; border-radius: 6px; background: {theme.reader_bg}; height: 14px;
+                       text-align: center; color: {theme.text}; font-size: 11px; }}
+        QProgressBar::chunk {{ background: {theme.accent}; border-radius: 6px; }}
+        QFrame#sidebar {{ background: {theme.surface}; border-right: 1px solid {theme.reader_bg}; }}
+        QLabel#brand {{ font-size: 15px; font-weight: 600; padding: 4px 6px; }}
+        QToolButton#nav {{ text-align: left; padding: 9px 12px; border-radius: 8px; font-size: 13px; }}
+        QToolButton#nav:hover {{ background: {theme.reader_bg}; }}
+        QToolButton#nav:checked {{ background: {theme.accent}; color: white; }}
         QLabel#muted {{ color: {theme.muted}; }}
         QLabel#heading {{ font-size: 20px; font-weight: 600; }}
     """)

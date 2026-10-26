@@ -20,10 +20,21 @@ uma biblioteca com capas e **lembra exatamente onde você parou**.
   destaque dos resultados (Ctrl+F, F3 / Shift+F3).
 - **Biblioteca** com capas, progresso, filtros (lendo, não iniciados, concluídos, favoritos),
   ordenação e botão **Continuar leitura**.
-- **Estatísticas**: tempo de leitura por livro (ignora períodos ociosos) e estimativa de
-  tempo restante.
-- Temas **Claro, Sépia e Escuro**, modo **duas páginas**, zoom (largura, página inteira,
-  livre), ajuste de fonte, **tela cheia** (F11).
+- **Seleção de texto e grifos**: arraste sobre o texto para copiar (Ctrl+C), grifar em quatro
+  cores (Ctrl+H grifa em amarelo), anotar, ver a **definição** (Wikcionário) ou **traduzir**
+  (MyMemory). Em EPUB/MOBI os grifos sobrevivem à mudança de fonte.
+- **Anotações**: todos os grifos de todos os livros, com busca, filtros e exportação para Markdown.
+- **Leitura em voz alta** com as vozes do Windows (🔊 Ouvir ou F5), virando as páginas sozinha.
+- **Coleções** próprias e **séries** detectadas pelo título (“Duna 2”, “Livro 3”, “vol. 1”…).
+- **Capa e dados da internet**: botão direito no livro → *Buscar capa e dados na internet*
+  (Open Library).
+- **Estatísticas**: minutos por dia, dias seguidos lendo, livros por mês, metas diária e anual
+  e estimativa de tempo restante em cada livro.
+- **Backup e sincronização**: backup/restauração em `.zip` e sincronização entre PCs por uma
+  pasta do OneDrive, Google Drive ou Dropbox (progresso, marcadores, grifos e coleções).
+- Temas **Claro, Sépia e Escuro**, **rolagem contínua**, modo **duas páginas**, zoom (largura,
+  página inteira, livre, Ctrl + roda), ajuste de fonte, **tela cheia** (F11).
+- **Uma janela só**: abrir um livro pelo Explorer com o app aberto usa a janela existente.
 - Arquivos movidos ou renomeados são reconhecidos pela impressão digital do conteúdo, sem
   perder progresso.
 
@@ -122,31 +133,61 @@ no Explorer.
 | Início / fim | Home / End |
 | Zoom | Ctrl + roda, Ctrl+= / Ctrl+-, Ctrl+0 (página inteira) |
 | Marcador | Ctrl+D |
+| Selecionar texto | arrastar com o botão esquerdo; duplo clique seleciona uma palavra |
+| Copiar / grifar seleção | Ctrl+C / Ctrl+H (outras cores e opções no botão direito) |
+| Mover página ampliada | arrastar com o botão do meio |
+| Ler em voz alta | F5 |
 | Buscar | Ctrl+F, F3 / Shift+F3 |
 | Painel lateral | Ctrl+B |
 | Tela cheia | F11 (Esc sai) |
 
 ## Dados
 
-Biblioteca, progresso, marcadores e preferências ficam em
+Biblioteca, progresso, marcadores, grifos, coleções, estatísticas e preferências ficam em
 `%APPDATA%\LeitorUniversal\biblioteca.db` (SQLite). Conversões do LibreOffice ficam em
 `%APPDATA%\LeitorUniversal\cache`. Remover um livro da biblioteca **nunca** apaga o arquivo.
+
+Dicionário, tradução e busca de capas só consultam a internet quando você pede, enviando
+apenas a palavra, o trecho ou o título escolhido.
+
+## Assinatura digital (aviso do SmartScreen)
+
+Sem assinatura, o Windows mostra “O Windows protegeu o computador” ao abrir o instalador
+baixado. O workflow de release já assina o executável e o instalador **quando o certificado
+está configurado**; sem ele, a release sai normalmente, sem assinatura.
+
+1. Obtenha um certificado de assinatura de código (`.pfx`), de uma autoridade certificadora
+   (Sectigo, DigiCert, Certum etc.). Certificados EV removem o aviso imediatamente; os comuns
+   ganham reputação com o tempo.
+2. No GitHub, em **Settings → Secrets and variables → Actions**, crie:
+   - `WINDOWS_CERT_PFX_BASE64`: o conteúdo do `.pfx` em Base64
+     (`[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))` no PowerShell);
+   - `WINDOWS_CERT_PASSWORD`: a senha do `.pfx`.
+3. A próxima versão publicada já sai assinada ([scripts/assinar.ps1](scripts/assinar.ps1)).
 
 ## Estrutura
 
 ```
 leitor_universal/
-  app.py           janela principal, importação, arrastar/soltar, tela cheia
-  documents.py     abertura universal e conversores de formato
-  library.py       persistência SQLite (livros, progresso, marcadores, preferências)
-  library_view.py  estante com capas, filtros e ordenação
-  reader.py        renderização, navegação, sumário, marcadores, busca, tempo de leitura
-  scanner.py       sincronização das pastas da biblioteca (em segundo plano)
-  settings_dialog.py  tela de Configurações e preferências
-  themes.py        temas da interface e coloração das páginas
-  updater.py       verificação, download e instalação de atualizações
+  app.py               janela principal, navegação lateral, importação, backup, sincronização
+  documents.py         abertura universal, conversores de formato e detecção de séries
+  library.py           persistência SQLite (livros, progresso, marcadores, grifos, coleções, estatísticas)
+  library_view.py      estante de capas reutilizável e tela da Biblioteca
+  collections_view.py  coleções e séries
+  annotations_view.py  todos os grifos e exportação para Markdown
+  stats_view.py        estatísticas, metas e gráficos
+  reader.py            leitura: modos de página, seleção, grifos, voz, dicionário, busca
+  speech.py            leitura em voz alta (vozes do Windows)
+  online.py            dicionário, tradução e Open Library
+  metadata_dialog.py   busca de capa e dados do livro
+  sync.py              backup, restauração e sincronização entre PCs
+  single_instance.py   uma janela só (repasse de arquivos)
+  scanner.py           sincronização das pastas da biblioteca (em segundo plano)
+  settings_dialog.py   tela de Configurações e preferências
+  themes.py            temas da interface e coloração das páginas
+  updater.py           verificação, download e instalação de atualizações
 packaging/         especificação do PyInstaller, instalador Inno Setup e ícone
-scripts/           publicar.ps1 (nova versão) e gerar_icone.py
+scripts/           publicar.ps1 (nova versão), assinar.ps1, notas_da_versao.py e gerar_icone.py
 tests/             testes automatizados e gerador de arquivos de exemplo
 .github/workflows/ CI (testes) e Release (instalador + publicação)
 run.pyw            inicializador sem console

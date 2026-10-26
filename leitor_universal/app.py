@@ -1,4 +1,5 @@
-"""Janela principal: alterna entre biblioteca e leitor, importa arquivos e guarda preferências."""
+"""Janela principal: navegação lateral (biblioteca, coleções, anotações, estatísticas),
+leitor, importação, sincronização, backup e atualizações."""
 from __future__ import annotations
 
 import logging
@@ -9,20 +10,26 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
-from PySide6.QtCore import QByteArray, QFileSystemWatcher, QLibraryInfo, Qt, QTimer, QTranslator, QUrl
+from PySide6.QtCore import (
+    QByteArray, QFileSystemWatcher, QLibraryInfo, QProcess, Qt, QTimer, QTranslator, QUrl,
+)
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QInputDialog, QMainWindow, QMessageBox, QProgressDialog,
-    QStackedWidget,
+    QApplication, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
+    QMessageBox, QProgressDialog, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import __version__, updater
+from . import __version__, single_instance, sync, updater
+from .annotations_view import AnnotationsView
+from .collections_view import CollectionsView
 from .documents import ALL_FORMATS, extensions_for, is_supported, open_document
 from .library import Library
-from .library_view import LibraryView
+from .library_view import CoverCache, LibraryView
+from .metadata_dialog import MetadataDialog
 from .reader import ReaderWidget
 from .scanner import ScanThread
 from .settings_dialog import Preferences, SettingsDialog
+from .stats_view import StatsView
 from .update_dialog import UpdateDialog
 from .themes import THEMES, apply_theme
 
@@ -30,6 +37,7 @@ APP_NAME = "Leitor Universal"
 UPDATE_CHECK_INTERVAL_MS = 6 * 3600 * 1000  # nova verificação enquanto o app fica aberto
 RESYNC_INTERVAL_MS = 10 * 60 * 1000  # varredura periódica das pastas monitoradas
 MAX_WATCHED_DIRS = 400
+CLOUD_SYNC_INTERVAL_MS = 5 * 60 * 1000  # sincronização entre PCs
 log = logging.getLogger("leitor")
 
 
@@ -54,11 +62,27 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.resize(1280, 820)
 
+        self.restart_requested = False
+        self._restore_path: Path | None = None
         theme = THEMES.get(library.setting("tema", "claro"), THEMES["claro"])
-        self.library_view = LibraryView(library, theme)
+        self.covers = CoverCache(library)
+        self.library_view = LibraryView(library, self.covers, theme)
+        self.collections_view = CollectionsView(library, self.covers, theme)
+        self.annotations_view = AnnotationsView(library)
+        self.stats_view = StatsView(library, theme)
         self.reader = ReaderWidget(library)
+
+        self.pages = QStackedWidget()
+        for page in (self.library_view, self.collections_view, self.annotations_view, self.stats_view):
+            self.pages.addWidget(page)
+        self.shell = QWidget()
+        shell_layout = QHBoxLayout(self.shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        shell_layout.addWidget(self._build_sidebar())
+        shell_layout.addWidget(self.pages, 1)
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.library_view)
+        self.stack.addWidget(self.shell)
         self.stack.addWidget(self.reader)
         self.setCentralWidget(self.stack)
 
@@ -66,14 +90,13 @@ class MainWindow(QMainWindow):
         lv.open_requested.connect(self.open_book)
         lv.add_files_requested.connect(self.choose_files)
         lv.add_folder_requested.connect(self.choose_folder)
-        lv.remove_requested.connect(self.remove_book)
-        lv.locate_requested.connect(self.locate_book)
-        lv.reveal_requested.connect(self.reveal_book)
-        lv.edit_requested.connect(self.edit_book)
+        lv.book_action.connect(self.book_action)
         lv.check_updates_requested.connect(lambda: self.check_for_updates(manual=True))
         lv.about_requested.connect(self.show_about)
-        lv.settings_requested.connect(self.open_settings)
         lv.sync_requested.connect(self.start_sync)
+        self.collections_view.open_requested.connect(self.open_book)
+        self.collections_view.book_action.connect(self.book_action)
+        self.annotations_view.open_at.connect(self.open_book_at)
         self.reader.back_requested.connect(self.show_library)
         self.reader.fullscreen_requested.connect(self.toggle_fullscreen)
         self.reader.theme_changed.connect(self.set_theme)
@@ -103,6 +126,119 @@ class MainWindow(QMainWindow):
         self._apply_watch()
         if self.library.folders():
             QTimer.singleShot(300, self.start_sync)
+        self._cloud_timer = QTimer(self, interval=CLOUD_SYNC_INTERVAL_MS, timeout=self.cloud_sync)
+        self._cloud_timer.start()
+        QTimer.singleShot(1500, self.cloud_sync)
+
+    # ------------------------------------------------------------ navegação lateral
+    def _build_sidebar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("sidebar")
+        bar.setFixedWidth(196)
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(10, 16, 10, 12)
+        layout.setSpacing(4)
+        brand = QLabel("📖  Leitor Universal")
+        brand.setObjectName("brand")
+        layout.addWidget(brand)
+        layout.addSpacing(14)
+        self.nav_group = QButtonGroup(self)
+        self.nav_buttons: dict[QWidget, QToolButton] = {}
+        for text, page in (("📚   Biblioteca", self.library_view), ("🗂   Coleções", self.collections_view),
+                           ("✎   Anotações", self.annotations_view), ("📊   Estatísticas", self.stats_view)):
+            btn = QToolButton()
+            btn.setObjectName("nav")
+            btn.setText(text)
+            btn.setCheckable(True)
+            btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            btn.clicked.connect(lambda _=False, pg=page: self.show_page(pg))
+            self.nav_group.addButton(btn)
+            self.nav_buttons[page] = btn
+            layout.addWidget(btn)
+        layout.addStretch(1)
+        settings_btn = QToolButton()
+        settings_btn.setObjectName("nav")
+        settings_btn.setText("⚙   Configurações")
+        settings_btn.clicked.connect(self.open_settings)
+        layout.addWidget(settings_btn)
+        self.nav_buttons[self.library_view].setChecked(True)
+        return bar
+
+    def show_page(self, page: QWidget) -> None:
+        self.nav_buttons[page].setChecked(True)
+        self.pages.setCurrentWidget(page)
+        page.refresh()
+
+    def _refresh_current_page(self) -> None:
+        self.pages.currentWidget().refresh()
+
+    # ------------------------------------------------------------ sincronização entre PCs
+    def cloud_sync(self, manual: bool = False, folder: str | None = None) -> None:
+        folder = folder if folder is not None else self.prefs.sync_folder
+        if not folder:
+            if manual:
+                QMessageBox.information(self, "Sincronização", "Escolha uma pasta de sincronização primeiro.")
+            return
+        if not Path(folder).is_dir():
+            log.warning("Pasta de sincronização indisponível: %s", folder)
+            if manual:
+                QMessageBox.warning(self, "Sincronização", f"A pasta não está acessível:\n{folder}")
+            return
+        self.reader.save_state()
+        try:
+            result = sync.sync_folder(self.library, folder)
+        except Exception as exc:
+            log.exception("Falha na sincronização entre PCs")
+            if manual:
+                QMessageBox.warning(self, "Sincronização", f"Não foi possível sincronizar: {exc}")
+            return
+        log.info("Sincronização: %s", result)
+        if self.stack.currentWidget() is self.shell:
+            self._refresh_current_page()
+        if manual:
+            QMessageBox.information(
+                self, "Sincronização",
+                f"Sincronizado com {result.devices} outro(s) computador(es).\n"
+                f"Progresso atualizado em {result.progress} livro(s); {result.annotations} anotação(ões) "
+                f"recebida(s); {result.removed} removida(s).")
+
+    # ------------------------------------------------------------ backup
+    def make_backup(self) -> None:
+        from datetime import date
+        default = Path.home() / f"LeitorUniversal-backup-{date.today():%Y-%m-%d}.zip"
+        path, _ = QFileDialog.getSaveFileName(self, "Salvar backup", str(default), "Backup (*.zip)")
+        if not path:
+            return
+        self.reader.save_state()
+        try:
+            sync.create_backup(self.library, Path(path))
+        except Exception as exc:
+            log.exception("Falha no backup")
+            QMessageBox.warning(self, "Backup", f"Não foi possível criar o backup: {exc}")
+            return
+        QMessageBox.information(self, "Backup", f"Backup salvo em:\n{path}")
+
+    def restore_backup(self, dialog=None) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Restaurar backup", str(Path.home()), "Backup (*.zip)")
+        if not path:
+            return
+        try:
+            info = sync.validate_backup(Path(path))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Restaurar backup", str(exc))
+            return
+        when = info.get("criado_em", "data desconhecida").replace("T", " ")
+        answer = QMessageBox.question(
+            self, "Restaurar backup",
+            f"Restaurar o backup de {when} ({info['livros']} livros)?\n\n"
+            "A biblioteca atual será substituída (uma cópia dela é guardada) e o aplicativo será reiniciado.")
+        if answer != QMessageBox.Yes:
+            return
+        if dialog:
+            dialog.reject()
+        self._restore_path = Path(path)
+        self.restart_requested = True
+        self.close()
 
     # ------------------------------------------------------ pastas e sincronização
     def _apply_watch(self) -> None:
@@ -158,8 +294,8 @@ class MainWindow(QMainWindow):
             "Biblioteca sincronizada: " + ", ".join(parts) + "." if parts else "")
         if parts:
             self._status_timer.start()
-        if self.stack.currentWidget() is self.library_view:
-            self.library_view.refresh()
+        if self.stack.currentWidget() is self.shell:
+            self._refresh_current_page()
         self._apply_watch()
         if self._sync_again:
             self._sync_again = False
@@ -168,12 +304,15 @@ class MainWindow(QMainWindow):
     def add_library_folder(self, folder: str) -> None:
         self.library.add_folder(folder)
         self.prefs.folders = self.library.folders()
-        self.library_view.refresh()
+        self._refresh_current_page()
         self._apply_watch()
         self.start_sync()
 
     def open_settings(self) -> None:
-        dialog = SettingsDialog(Preferences.load(self.library), self)
+        dialog = SettingsDialog(Preferences.load(self.library), self.reader.narrator.voices(), self)
+        dialog.backup_requested.connect(self.make_backup)
+        dialog.restore_requested.connect(lambda: self.restore_backup(dialog))
+        dialog.sync_now_requested.connect(lambda: self.cloud_sync(manual=True, folder=dialog._sync_folder))
         if dialog.exec() != SettingsDialog.Accepted:
             return
         old, new = self.prefs, dialog.prefs
@@ -188,10 +327,12 @@ class MainWindow(QMainWindow):
         if new.theme != old.theme:
             self.set_theme(new.theme)
         self._apply_watch()
-        self.library_view.refresh()
+        self._refresh_current_page()
         if (new.folders != old.folders or new.formats != old.formats
                 or new.recursive != old.recursive):
             self.start_sync()
+        if new.sync_folder and new.sync_folder != old.sync_folder:
+            self.cloud_sync()
         if dialog.check_updates_now:
             self.check_for_updates(manual=True)
 
@@ -271,6 +412,8 @@ class MainWindow(QMainWindow):
         theme = THEMES[key]
         apply_theme(QApplication.instance(), theme)
         self.library_view.set_theme(theme)
+        self.collections_view.set_theme(theme)
+        self.stats_view.set_theme(theme)
         self.reader.set_theme(theme)
         self.library.set_setting("tema", key)
 
@@ -280,8 +423,9 @@ class MainWindow(QMainWindow):
             self.toggle_fullscreen()
         self.reader.close_book()
         self.setWindowTitle(APP_NAME)
-        self.library_view.refresh()
-        self.stack.setCurrentWidget(self.library_view)
+        self.stack.setCurrentWidget(self.shell)
+        self._refresh_current_page()
+        self.cloud_sync()
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -322,6 +466,36 @@ class MainWindow(QMainWindow):
         self.reader.open_book(book, loaded)
         self.setWindowTitle(f"{book.title} — {APP_NAME}")
 
+    def open_book_at(self, book_id: int, page: int, position: str) -> None:
+        self.open_book(book_id)
+        if self.reader.book and self.reader.book.id == book_id:
+            self.reader.open_at(page, position)
+
+    def receive_files(self, paths: list[str]) -> None:
+        """Arquivos vindos de uma segunda abertura (duplo clique no Explorer)."""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if paths:
+            if self.stack.currentWidget() is self.reader:
+                self.show_library()
+            self.open_paths(paths)
+
+    def book_action(self, name: str, book_id: int) -> None:
+        if name == "edit":
+            self.edit_book(book_id)
+        elif name == "online":
+            if MetadataDialog(self.library, self.library.get(book_id), self).exec():
+                self.covers.invalidate(book_id)
+        elif name == "reveal":
+            self.reveal_book(book_id)
+        elif name == "locate":
+            self.locate_book(book_id)
+        elif name == "remove":
+            self.remove_book(book_id)
+        self._refresh_current_page()
+
     def open_paths(self, paths: list[str]) -> None:
         """Pastas viram pastas da biblioteca; arquivos são importados (um único já abre)."""
         files: list[Path] = []
@@ -334,6 +508,8 @@ class MainWindow(QMainWindow):
         if not files:
             return
         imported, errors = self._import(files)
+        if self.stack.currentWidget() is self.reader and not (len(files) == 1 and imported):
+            self.show_library()
         if errors:
             details = "\n".join(f"• {name}: {msg}" for name, msg in errors[:15])
             more = f"\n… e mais {len(errors) - 15}" if len(errors) > 15 else ""
@@ -341,7 +517,7 @@ class MainWindow(QMainWindow):
         if len(files) == 1 and imported:
             self.open_book(imported[0])
         else:
-            self.library_view.refresh()
+            self._refresh_current_page()
 
     def _import(self, files: list[Path]) -> tuple[list[int], list[tuple[str, str]]]:
         imported, errors = [], []
@@ -392,7 +568,7 @@ class MainWindow(QMainWindow):
             "O arquivo no disco NÃO será excluído.")
         if answer == QMessageBox.Yes:
             self.library.remove(book_id)
-            self.library_view.invalidate_cover(book_id)
+            self.covers.invalidate(book_id)
 
     def locate_book(self, book_id: int) -> bool:
         book = self.library.get(book_id)
@@ -401,7 +577,7 @@ class MainWindow(QMainWindow):
         if not path:
             return False
         self.library.set_path(book_id, path)
-        self.library_view.refresh()
+        self._refresh_current_page()
         return True
 
     def reveal_book(self, book_id: int) -> None:
@@ -436,7 +612,12 @@ class MainWindow(QMainWindow):
             self._scan_thread.wait(5000)
         self.reader.close_book()
         self.library.set_setting("geometria", bytes(self.saveGeometry().toBase64()).decode())
+        if not self._restore_path:
+            self.cloud_sync()
         self.library.close()
+        if self._restore_path:
+            sync.restore_backup(self._restore_path, self.library.data_dir)
+            log.info("Backup restaurado de %s", self._restore_path)
         super().closeEvent(event)
 
 
@@ -471,11 +652,23 @@ def main(argv: list[str] | None = None) -> int:
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
+    paths = [os.path.abspath(p) for p in argv[1:]]
+    if single_instance.send_to_running(paths):
+        log.info("Já em execução: arquivos repassados à janela aberta")
+        return 0
+    server = single_instance.InstanceServer(parent=app)
+
     library = Library(data_dir)
     window = MainWindow(library)
+    server.files_received.connect(window.receive_files)
     window.show()
-    if len(argv) > 1:
-        window.open_paths(argv[1:])
+    if paths:
+        window.open_paths(paths)
     elif window.prefs.open_last:
         QTimer.singleShot(0, window.open_last_book)
-    return app.exec()
+    code = app.exec()
+    if window.restart_requested:
+        server.server.close()
+        args = [] if getattr(sys, "frozen", False) else [os.path.abspath(sys.argv[0])]
+        QProcess.startDetached(sys.executable, args)
+    return code

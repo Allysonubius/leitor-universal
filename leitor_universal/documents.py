@@ -74,6 +74,32 @@ CHAPTER_RE = re.compile(
 )
 
 
+SERIES_PATTERNS = [
+    # "Nome - Livro 3", "Nome, vol. 2", "Nome (Parte 1)", "Nome #4"
+    re.compile(r"^(?P<name>.+?)[\s,:\-–—(\[]*(?:vol(?:ume)?\.?|livro|book|parte|part|tomo|#|n[º°o]\.?)"
+               r"\s*(?P<num>\d{1,3}(?:[.,]\d)?)\b", re.IGNORECASE),
+    # "Duna 2" (número curto no fim; anos de 4 dígitos não contam)
+    re.compile(r"^(?P<name>.+?\D)\s+(?P<num>\d{1,2})$"),
+]
+
+
+NOT_SERIES = {"capítulo", "capitulo", "chapter", "página", "pagina", "page", "parte", "part",
+              "volume", "livro", "book", "aula", "lição", "licao", "edição", "edicao"}
+
+
+def detect_series(title: str, stem: str = "") -> tuple[str | None, float | None]:
+    """Identifica série e número a partir do título (ou do nome do arquivo)."""
+    for text in (title, stem.replace("_", " ")):
+        text = (text or "").strip()
+        for pattern in SERIES_PATTERNS:
+            match = pattern.match(text)
+            if match:
+                name = match.group("name").strip(" -–—:,([#")
+                if len(name) >= 3 and name.lower() not in NOT_SERIES:
+                    return name, float(match.group("num").replace(",", "."))
+    return None, None
+
+
 class UnsupportedFormat(Exception):
     pass
 

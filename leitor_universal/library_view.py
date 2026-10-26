@@ -1,4 +1,4 @@
-"""Tela da biblioteca: estante com capas, progresso, busca, filtros e ordenação."""
+"""Estante de livros (componente reutilizável) e tela da Biblioteca."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,9 +6,9 @@ from pathlib import Path
 from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem,
-    QMenu, QPushButton, QStackedLayout, QStyle, QStyledItemDelegate, QToolButton, QVBoxLayout,
-    QWidget,
+    QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
+    QListWidgetItem, QMenu, QPushButton, QStackedLayout, QStyle, QStyledItemDelegate, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from .library import Book, Library, is_inside
@@ -22,21 +22,44 @@ SORTS = {
     "adicionados": ("Adicionados recentemente", lambda b: b.added_at or "", True),
     "titulo": ("Título", lambda b: b.title.lower(), False),
     "autor": ("Autor", lambda b: (b.author or "~").lower(), False),
+    "serie": ("Série", lambda b: ((b.series or "~").lower(), b.series_index or 0, b.title.lower()), False),
     "progresso": ("Progresso", lambda b: b.progress, True),
 }
+# Ações que dependem da janela principal (diálogos, Explorer, internet).
+BOOK_ACTIONS = ("edit", "online", "reveal", "locate", "remove")
+
+
+class CoverCache:
+    """Capas decodificadas sob demanda e compartilhadas entre as telas."""
+
+    def __init__(self, library: Library):
+        self.library = library
+        self._items: dict[int, QPixmap] = {}
+
+    def get(self, book_id: int) -> QPixmap:
+        if book_id not in self._items:
+            pix = QPixmap()
+            data = self.library.cover(book_id)
+            if data:
+                pix.loadFromData(data)
+            self._items[book_id] = pix
+        return self._items[book_id]
+
+    def invalidate(self, book_id: int) -> None:
+        self._items.pop(book_id, None)
 
 
 class BookCardDelegate(QStyledItemDelegate):
-    def __init__(self, view: "LibraryView"):
-        super().__init__(view)
-        self.view = view
+    def __init__(self, grid: "BookGrid"):
+        super().__init__(grid)
+        self.grid = grid
 
     def sizeHint(self, option, index) -> QSize:
         return QSize(CARD_W, CARD_H)
 
     def paint(self, painter: QPainter, option, index) -> None:
         book: Book = index.data(Qt.UserRole)
-        theme: Theme = self.view.theme
+        theme: Theme = self.grid.theme
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -49,15 +72,14 @@ class BookCardDelegate(QStyledItemDelegate):
             painter.setBrush(bg)
             painter.drawRoundedRect(rect, 10, 10)
 
-        # Capa
         cover_rect = QRect(rect.x() + 8, rect.y() + 8, rect.width() - 16, COVER_H - 16)
-        pix = self.view.cover_for(book)
-        path = QPainterPath()
-        if pix and not pix.isNull():
+        pix = self.grid.covers.get(book.id)
+        if not pix.isNull():
             scaled = pix.scaled(cover_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             target = QRect(0, 0, scaled.width(), scaled.height())
             target.moveCenter(cover_rect.center())
             target.moveBottom(cover_rect.bottom())
+            path = QPainterPath()
             path.addRoundedRect(target, 4, 4)
             painter.setClipPath(path)
             painter.drawPixmap(target, scaled)
@@ -70,9 +92,8 @@ class BookCardDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(theme.reader_bg))
             painter.drawRoundedRect(cover_rect, 4, 4)
             painter.setPen(QColor(theme.muted))
-            painter.drawText(cover_rect, Qt.AlignCenter | Qt.TextWordWrap, book.title)
+            painter.drawText(cover_rect.adjusted(8, 8, -8, -8), Qt.AlignCenter | Qt.TextWordWrap, book.title)
 
-        # Selo de formato
         painter.setFont(_font(8, bold=True))
         badge = book.kind.upper()
         bw = painter.fontMetrics().horizontalAdvance(badge) + 10
@@ -87,7 +108,6 @@ class BookCardDelegate(QStyledItemDelegate):
             painter.setPen(QColor("#f5b301"))
             painter.drawText(QRect(cover_rect.x() + 6, cover_rect.y() + 2, 24, 24), Qt.AlignCenter, "★")
 
-        # Textos
         y = rect.y() + COVER_H
         text_rect = QRect(rect.x() + 8, y, rect.width() - 16, 36)
         painter.setFont(_font(9, bold=True))
@@ -97,12 +117,13 @@ class BookCardDelegate(QStyledItemDelegate):
         title_h = painter.fontMetrics().lineSpacing() * (title.count("\n") + 1)
         painter.setFont(_font(8))
         painter.setPen(QColor(theme.muted))
+        subtitle = book.author or "Autor desconhecido"
+        if book.series:
+            subtitle = f"{book.series} · nº {book.series_index:g}" if book.series_index else book.series
         author_rect = QRect(rect.x() + 8, y + title_h + 2, rect.width() - 16, 16)
         painter.drawText(author_rect, Qt.AlignLeft,
-                         painter.fontMetrics().elidedText(book.author or "Autor desconhecido",
-                                                          Qt.ElideRight, author_rect.width()))
+                         painter.fontMetrics().elidedText(subtitle, Qt.ElideRight, author_rect.width()))
 
-        # Progresso
         bar = QRect(rect.x() + 8, rect.bottom() - 14, rect.width() - 56, 4)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(theme.reader_bg))
@@ -141,24 +162,100 @@ def _elide_lines(painter: QPainter, text: str, width: int, lines: int) -> str:
     return "\n".join(out)
 
 
+class BookGrid(QListWidget):
+    """Grade de capas com menu de contexto; usada pela Biblioteca e pelas Coleções."""
+
+    open_requested = Signal(int)
+    action_requested = Signal(str, int)
+    changed = Signal()
+
+    def __init__(self, library: Library, covers: CoverCache, theme: Theme, parent=None):
+        super().__init__(parent)
+        self.library = library
+        self.covers = covers
+        self.theme = theme
+        self.setViewMode(QListView.IconMode)
+        self.setResizeMode(QListView.Adjust)
+        self.setMovement(QListView.Static)
+        self.setUniformItemSizes(True)
+        self.setGridSize(QSize(CARD_W + 8, CARD_H + 8))
+        self.setSpacing(4)
+        self.setMouseTracking(True)
+        self.setItemDelegate(BookCardDelegate(self))
+        self.itemActivated.connect(lambda it: self.open_requested.emit(it.data(Qt.UserRole).id))
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._context_menu)
+
+    def set_books(self, books: list[Book]) -> None:
+        self.setUpdatesEnabled(False)
+        self.clear()
+        for book in books:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, book)
+            tip = f"{book.title}\n{book.author}\n{book.path}"
+            if book.description:
+                tip += "\n\n" + book.description[:400]
+            item.setToolTip(tip)
+            self.addItem(item)
+        self.setUpdatesEnabled(True)
+
+    def _context_menu(self, pos) -> None:
+        item = self.itemAt(pos)
+        if not item:
+            return
+        book: Book = item.data(Qt.UserRole)
+        menu = QMenu(self)
+        handlers = {
+            menu.addAction("Abrir"): lambda: self.open_requested.emit(book.id),
+            menu.addAction("Remover dos favoritos" if book.favorite else "★ Favoritar"):
+                lambda: self.library.set_flag(book.id, "favorite", not book.favorite),
+            menu.addAction("Marcar como não lido" if book.finished else "Marcar como lido"):
+                lambda: self.library.set_flag(book.id, "finished", not book.finished),
+            menu.addAction("Recomeçar do início"): lambda: self.library.reset_progress(book.id),
+        }
+        collections_menu = menu.addMenu("Coleções")
+        member_of = self.library.collections_of(book.id)
+        for col in self.library.collections():
+            act = collections_menu.addAction(col.name)
+            act.setCheckable(True)
+            act.setChecked(col.id in member_of)
+            handlers[act] = (lambda c=col.id, m=col.id in member_of:
+                             self.library.set_in_collection(c, book.id, not m))
+        collections_menu.addSeparator()
+        handlers[collections_menu.addAction("Nova coleção…")] = lambda: self._new_collection(book.id)
+        menu.addSeparator()
+        labels = {"edit": "Editar título/autor…", "online": "Buscar capa e dados na internet…",
+                  "reveal": "Mostrar no Explorer", "locate": "Localizar arquivo…",
+                  "remove": "Remover da biblioteca"}
+        for name in BOOK_ACTIONS:
+            if name == "reveal":
+                menu.addSeparator()
+            handlers[menu.addAction(labels[name])] = lambda n=name: self.action_requested.emit(n, book.id)
+        chosen = menu.exec(self.viewport().mapToGlobal(pos))
+        if chosen in handlers:
+            handlers[chosen]()
+            self.changed.emit()
+
+    def _new_collection(self, book_id: int) -> None:
+        name, ok = QInputDialog.getText(self, "Nova coleção", "Nome da coleção:")
+        if ok and name.strip():
+            self.library.set_in_collection(self.library.create_collection(name), book_id, True)
+
+
 class LibraryView(QWidget):
     open_requested = Signal(int)
     add_files_requested = Signal()
     add_folder_requested = Signal()
-    remove_requested = Signal(int)
-    locate_requested = Signal(int)
-    reveal_requested = Signal(int)
-    edit_requested = Signal(int)
     check_updates_requested = Signal()
     about_requested = Signal()
-    settings_requested = Signal()
     sync_requested = Signal()
+    book_action = Signal(str, int)
 
-    def __init__(self, library: Library, theme: Theme, parent=None):
+    def __init__(self, library: Library, covers: CoverCache, theme: Theme, parent=None):
         super().__init__(parent)
         self.library = library
+        self.covers = covers
         self.theme = theme
-        self._covers: dict[int, QPixmap] = {}
 
         title = QLabel("Minha biblioteca")
         title.setObjectName("heading")
@@ -170,8 +267,6 @@ class LibraryView(QWidget):
         self.sync_btn = QPushButton("⟳ Sincronizar")
         self.sync_btn.setToolTip("Procurar livros novos nas pastas da biblioteca")
         self.sync_btn.clicked.connect(self.sync_requested.emit)
-        settings_btn = QPushButton("⚙ Configurações")
-        settings_btn.clicked.connect(self.settings_requested.emit)
 
         header = QHBoxLayout()
         titles = QVBoxLayout()
@@ -180,7 +275,6 @@ class LibraryView(QWidget):
         header.addLayout(titles)
         header.addStretch(1)
         header.addWidget(self.sync_btn)
-        header.addWidget(settings_btn)
         header.addWidget(self.continue_btn)
         self.menu_btn = QToolButton()
         self.menu_btn.setText("⋮")
@@ -188,22 +282,23 @@ class LibraryView(QWidget):
         self.menu_btn.setPopupMode(QToolButton.InstantPopup)
         options = QMenu(self.menu_btn)
         options.addAction("Abrir um arquivo avulso…", self.add_files_requested.emit)
+        options.addAction("Adicionar pasta de livros…", self.add_folder_requested.emit)
         options.addAction("Verificar atualizações", self.check_updates_requested.emit)
         options.addAction("Sobre o Leitor Universal", self.about_requested.emit)
         self.menu_btn.setMenu(options)
         header.addWidget(self.menu_btn)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Buscar por título, autor ou formato…")
+        self.search.setPlaceholderText("Buscar por título, autor, série ou formato…")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.refresh)
+        self.folder_combo = QComboBox()
+        self.folder_combo.setMinimumWidth(160)
+        self.folder_combo.currentIndexChanged.connect(self.refresh)
         self.filter_combo = QComboBox()
         for key, label in FILTERS.items():
             self.filter_combo.addItem(label, key)
         self.filter_combo.currentIndexChanged.connect(self.refresh)
-        self.folder_combo = QComboBox()
-        self.folder_combo.setMinimumWidth(160)
-        self.folder_combo.currentIndexChanged.connect(self.refresh)
         self.sort_combo = QComboBox()
         for key, (label, _, _) in SORTS.items():
             self.sort_combo.addItem(label, key)
@@ -214,19 +309,10 @@ class LibraryView(QWidget):
         controls.addWidget(self.filter_combo)
         controls.addWidget(self.sort_combo)
 
-        self.grid = QListWidget()
-        self.grid.setViewMode(QListView.IconMode)
-        self.grid.setResizeMode(QListView.Adjust)
-        self.grid.setMovement(QListView.Static)
-        self.grid.setUniformItemSizes(True)
-        self.grid.setGridSize(QSize(CARD_W + 8, CARD_H + 8))
-        self.grid.setSpacing(4)
-        self.grid.setMouseTracking(True)
-        self.grid.setItemDelegate(BookCardDelegate(self))
-        self.grid.itemActivated.connect(lambda it: self.open_requested.emit(it.data(Qt.UserRole).id))
-        self.grid.itemDoubleClicked.connect(lambda it: self.open_requested.emit(it.data(Qt.UserRole).id))
-        self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.grid.customContextMenuRequested.connect(self._context_menu)
+        self.grid = BookGrid(library, covers, theme)
+        self.grid.open_requested.connect(self.open_requested.emit)
+        self.grid.action_requested.connect(self.book_action.emit)
+        self.grid.changed.connect(self.refresh)
 
         self.empty = QWidget()
         self.empty_text = QLabel()
@@ -258,15 +344,8 @@ class LibraryView(QWidget):
 
     def set_theme(self, theme: Theme) -> None:
         self.theme = theme
+        self.grid.theme = theme
         self.grid.viewport().update()
-
-    def cover_for(self, book: Book) -> QPixmap | None:
-        if book.id not in self._covers:
-            pix = QPixmap()
-            if book.cover:
-                pix.loadFromData(book.cover)
-            self._covers[book.id] = pix
-        return self._covers[book.id]
 
     def set_sync_status(self, text: str) -> None:
         self.sync_label.setText(text)
@@ -296,7 +375,7 @@ class LibraryView(QWidget):
             books = [b for b in books if not any(is_inside(b.path, f) for f in folders)]
         query = self.search.text().strip().lower()
         if query:
-            books = [b for b in books if query in f"{b.title} {b.author} {b.kind}".lower()]
+            books = [b for b in books if query in f"{b.title} {b.author} {b.kind} {b.series or ''}".lower()]
         flt = self.filter_combo.currentData()
         if flt == "favoritos":
             books = [b for b in books if b.favorite]
@@ -304,20 +383,12 @@ class LibraryView(QWidget):
             books = [b for b in books if b.status == flt]
         _, key, reverse = SORTS[self.sort_combo.currentData()]
         books.sort(key=key, reverse=reverse)
-
-        self.grid.clear()
-        for book in books:
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, book)
-            item.setToolTip(f"{book.title}\n{book.author}\n{book.path}")
-            self.grid.addItem(item)
+        self.grid.set_books(books)
 
         stats = self.library.stats()
-        hours = stats["seconds"] / 3600
         self.stats_label.setText(
             f"{stats['total']} livro(s)  ·  {stats['finished']} concluído(s)  ·  "
-            f"{hours:.1f} h de leitura registradas"
-        )
+            f"{stats['seconds'] / 3600:.1f} h de leitura registradas")
         has_folders = bool(self.library.folders())
         if stats["total"] == 0:
             self.empty_text.setText(
@@ -335,33 +406,9 @@ class LibraryView(QWidget):
             self.continue_btn.setToolTip(f"{last.title} — {last.progress:.0%}")
 
     def invalidate_cover(self, book_id: int) -> None:
-        self._covers.pop(book_id, None)
+        self.covers.invalidate(book_id)
 
     def _continue(self) -> None:
         last = self.library.last_read()
         if last:
             self.open_requested.emit(last.id)
-
-    def _context_menu(self, pos) -> None:
-        item = self.grid.itemAt(pos)
-        if not item:
-            return
-        book: Book = item.data(Qt.UserRole)
-        menu = QMenu(self)
-        actions = {
-            menu.addAction("Abrir"): lambda: self.open_requested.emit(book.id),
-            menu.addAction("Remover dos favoritos" if book.favorite else "★ Favoritar"):
-                lambda: self.library.set_flag(book.id, "favorite", not book.favorite),
-            menu.addAction("Marcar como não lido" if book.finished else "Marcar como lido"):
-                lambda: self.library.set_flag(book.id, "finished", not book.finished),
-            menu.addAction("Recomeçar do início"): lambda: self.library.reset_progress(book.id),
-            menu.addAction("Editar título/autor…"): lambda: self.edit_requested.emit(book.id),
-        }
-        menu.addSeparator()
-        actions[menu.addAction("Mostrar no Explorer")] = lambda: self.reveal_requested.emit(book.id)
-        actions[menu.addAction("Localizar arquivo…")] = lambda: self.locate_requested.emit(book.id)
-        actions[menu.addAction("Remover da biblioteca")] = lambda: self.remove_requested.emit(book.id)
-        chosen = menu.exec(self.grid.viewport().mapToGlobal(pos))
-        if chosen in actions:
-            actions[chosen]()
-            self.refresh()

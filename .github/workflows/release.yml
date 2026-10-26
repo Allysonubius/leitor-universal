@@ -40,6 +40,15 @@ jobs:
       - name: Empacotar com PyInstaller
         run: pyinstaller packaging/LeitorUniversal.spec --noconfirm
 
+      # Assinatura digital (evita o aviso do SmartScreen). Só roda com os secrets
+      # WINDOWS_CERT_PFX_BASE64 e WINDOWS_CERT_PASSWORD configurados no repositório.
+      - name: Assinar executável
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: ./scripts/assinar.ps1 dist/LeitorUniversal/LeitorUniversal.exe
+
       - name: Gerar instalador
         shell: pwsh
         run: |
@@ -47,6 +56,13 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
           & $iscc "/DAppVersion=${{ steps.versao.outputs.valor }}" packaging/installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o instalador" }
+
+      - name: Assinar instalador
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: ./scripts/assinar.ps1 (Get-ChildItem dist/LeitorUniversal-*-setup.exe).FullName
 
       - name: Versão portátil e checksums
         shell: pwsh
